@@ -1,6 +1,8 @@
 // NVN command buffers: commands are recorded into the guest-provided command memory as CmdRec
 // records, so the game's own memory management and out-of-memory callbacks work as designed.
 // A command handle is the guest address of a list's first record.
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -55,11 +57,50 @@ NVN(nvnCommandBufferSetMemoryCallbackData) { cb_of(A(0))->callback_data = A(1); 
 NVN(nvnCommandBufferGetMemoryCallbackData) { RET(cb_of(A(0))->callback_data); }
 NVN(nvnCommandBufferSetCommandMemoryCallbackEnabled) { (void)c; }
 
+// The game's command buffers are sized for its own draws, some 700 a frame seen from above. The first-person view's far
+// scenery draws several times as many (3,900 measured 27/10), and our records are larger than NVN's own commands: a
+// buffer whose owner has no handler for running out ran out - the game's memory callback (f_700113e6c0) calls one of
+// two handlers at +0xd0 / +0xd8 of its data, null for that buffer, and jumped to 0: « no function at 0 », the game
+// stopped (Guillaume's headset, 27/10). Such a buffer goes on in an overflow of ours instead: chunks of a ring of guest
+// memory, taken in turn (a list recorded there is translated within a frame or two; the ring comes back to a chunk
+// after OV_CHUNKS of them). The game's own memory, when it adds some, takes over again (AddCommandMemory).
+#define OV_CHUNK (256u * 1024u)
+#define OV_CHUNKS 128u  // (32 MB of the HLE heap's 224)
+static uint8_t *_Atomic g_ov;
+static _Atomic uint32_t g_ov_next;
+static bool no_handler(const NvnCmdBuf *cb) {
+    if (!cb->callback) return true;
+    if (cb->callback == 0x700113e6c0ull && cb->callback_data)  // (the game's dispatcher; event 0's handler)
+        return *(const uint64_t *)(uintptr_t)(cb->callback_data + 0xd0) == 0;
+    return false;
+}
+static bool overflow(NvnCmdBuf *cb, uint32_t need) {
+    if (need + JUMP_RESERVE > OV_CHUNK) return false;
+    if (!g_ov) {
+        static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
+        pthread_mutex_lock(&m);
+        if (!g_ov) g_ov = hle_alloc((uint64_t)OV_CHUNK * OV_CHUNKS);
+        pthread_mutex_unlock(&m);
+    }
+    uint32_t k = atomic_fetch_add(&g_ov_next, 1) % OV_CHUNKS;
+    uint64_t mem = (uint64_t)(uintptr_t)(g_ov + (size_t)k * OV_CHUNK);
+    if (cb->recording && cb->mem) {  // (chained, as AddCommandMemory does)
+        CmdRec *j = raw_rec(cb->mem + cb->used, CMD_JUMP, sizeof(CmdRec));
+        j->x[0] = mem;
+    }
+    cb->mem = mem, cb->size = OV_CHUNK, cb->used = 0;
+    static _Atomic int said;
+    if (atomic_fetch_add(&said, 1) < 4)
+        LOG("[nvn] command buffer %llx out of memory with no handler: our overflow (chunk %u)\n", (unsigned long long)cb->guest, k);
+    return true;
+}
+
 // Reserve a record. May call back into the guest for more memory, so callers snapshot their
 // arguments first.
 static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
     uint32_t size = (uint32_t)((sizeof(CmdRec) + extra + 7) & ~7u);
     for (int tries = 0; !cb->mem || cb->used + size + JUMP_RESERVE > cb->size; tries++) {
+        if (no_handler(cb) && overflow(cb, size)) continue;
         if (!cb->callback || tries == 2) FATAL("nvn: out of command memory (need %u)\n", size);
         uint64_t saved[8];
         memcpy(saved, c->x, sizeof saved);
@@ -347,7 +388,7 @@ static void trace_draw(Cpu *c, uint64_t count) {
     if (n++ > 40) return;
     LOG("[trace] draw count %llu lr %llx chain:", (unsigned long long)count, (unsigned long long)c->x[30]);
     uint64_t fp = c->x[29];
-    for (int i = 0; i < 14 && fp >= 0x7000000000ull && fp < 0x8000000000ull && (fp & 7) == 0; i++) {
+    for (int i = 0; i < 14 && fp >= GUEST_LO && fp < GUEST_HI && (fp & 7) == 0; i++) {
         uint64_t next = *(uint64_t *)(uintptr_t)fp, lr = *(uint64_t *)(uintptr_t)(fp + 8);
         LOG(" %llx", (unsigned long long)lr);
         if (next <= fp) break;

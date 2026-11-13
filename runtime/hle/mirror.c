@@ -59,6 +59,13 @@ bool mirror_input(void) {
     return g_settings.mirror_mode && g_world_frame != ~0ull && renderer_present_count() - g_world_frame <= 2;
 }
 
+// The world is on screen (its composite drawn this frame or the last two): not the pause menu, not the map. The
+// first-person view turns the stick by where it looks only then (runtime/hle/firstperson.c fp_input): on the map the
+// cursor went backwards when he looked south (Guillaume, 20/10).
+uint64_t g_world_frame_dbg(void) { return g_scene_frame; }  // (LARECOMP_LOG_LOOK)
+void world_seen(void) { g_scene_frame = renderer_present_count(); }  // (the Vulkan backend: a composite the scene's size)
+// (world_on_screen: beta 6's, above - the last three frames)
+
 
 // The in-world action prompt ("Lift", "Read", "Talk"... - Cm_HUD's L_Interact_00) sits at its target's spot on screen.
 // tools/patches.py PROMPT_POS_SITE: the HUD writes the prompt pane's translation (x right of the centre) each time it
@@ -66,6 +73,14 @@ bool mirror_input(void) {
 #include <string.h>
 #include "../hle.h"
 float rt_prompt_x(uint64_t pane, float x) {
-    if (!mirror_input() || memcmp((const char *)(uintptr_t)(pane + 0xB0), "L_Interact_00", 14)) return x;
-    return -x;
+    if (memcmp((const char *)(uintptr_t)(pane + 0xB0), "L_Interact_00", 14)) return x;
+    return mirror_input() ? -x : x;
+}
+
+// x and y together (first-person view: the prompt in the middle - runtime/hle/firstperson.c fp_prompt)
+void rt_prompt_xy(uint64_t pane, float *x, float *y) {
+    if (memcmp((const char *)(uintptr_t)(pane + 0xB0), "L_Interact_00", 14)) return;
+    extern bool fp_prompt(float *x, float *y);
+    if (fp_prompt(x, y)) return;
+    if (mirror_input()) *x = -*x;
 }

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- LASRecomp on the Quest 3 (android/xr_app.c): a NativeActivity, the OpenXR permissions and queries the Khronos
+     loader needs, and the refresh-rate features (without them the Quest offers no rate above 72 Hz) -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.lasrecomp.quest"
+    android:versionCode="1" android:versionName="0.1" android:installLocation="auto">
+  <uses-feature android:name="android.hardware.vr.headtracking" android:required="true" android:version="1" />
+  <uses-feature android:name="com.oculus.feature.120HZ" android:required="false" />
+  <uses-feature android:name="com.oculus.feature.90HZ" android:required="false" />
+  <uses-feature android:name="oculus.software.handtracking" android:required="false" />
+  <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />
+  <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />
+  <queries>
+    <provider android:authorities="org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker" />
+    <intent><action android:name="org.khronos.openxr.OpenXRRuntimeService" /></intent>
+    <intent><action android:name="org.khronos.openxr.OpenXRApiLayerService" /></intent>
+  </queries>
+  <!-- (debuggable: lib/arm64-v8a/wrap.sh runs, which takes the game's fixed address range before anything of the app
+       is loaded there - on 27/10 the headset's app process had its libraries in it and the game could not start) -->
+  <application android:label="LASRecomp" android:hasCode="false" android:extractNativeLibs="true"
+      android:allowBackup="false" android:debuggable="true">
+    <!-- (simpleperf from adb may record it: profiling on the headset, no debuggable build needed) -->
+    <profileable android:shell="true" />
+    <meta-data android:name="com.oculus.supportedDevices" android:value="quest2|quest3|quest3s|questpro" />
+    <activity android:name="android.app.NativeActivity" android:exported="true" android:launchMode="singleTask"
+        android:screenOrientation="landscape" android:resizeableActivity="false"
+        android:configChanges="density|keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|uiMode">
+      <meta-data android:name="android.app.lib_name" android:value="lasrecomp" />
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+        <category android:name="com.oculus.intent.category.VR" />
+      </intent-filter>
+    </activity>
+  </application>
+</manifest>

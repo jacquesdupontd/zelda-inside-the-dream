@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- LAS Recomp on an Android tablet or phone, on its own screen (android/flat_app.c): a NativeActivity in landscape,
+     full screen, the screen kept on; a gamepad is the Switch pad. Its own package: it lives beside the Quest app. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.lasrecomp.tablet"
+    android:versionCode="1" android:versionName="beta_4" android:installLocation="auto">
+  <uses-feature android:glEsVersion="0x00030000" android:required="true" />
+  <uses-feature android:name="android.hardware.vulkan.version" android:version="0x401000" android:required="true" />
+  <uses-feature android:name="android.hardware.gamepad" android:required="false" />
+  <!-- (debuggable: Android then starts it through lib/arm64-v8a/wrap.sh, afresh rather than forked from zygote, the
+       game's memory range held first - android/guestreserve.c) -->
+  <application android:label="LAS Recomp" android:hasCode="false" android:extractNativeLibs="true"
+      android:allowBackup="false" android:isGame="true" android:appCategory="game" android:debuggable="true">
+    <profileable android:shell="true" />
+    <activity android:name="android.app.NativeActivity" android:exported="true" android:launchMode="singleTask"
+        android:screenOrientation="sensorLandscape" android:resizeableActivity="false"
+        android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
+        android:configChanges="density|keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|smallestScreenSize|uiMode">
+      <meta-data android:name="android.app.lib_name" android:value="lasrecomp" />
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+    </activity>
+  </application>
+</manifest>

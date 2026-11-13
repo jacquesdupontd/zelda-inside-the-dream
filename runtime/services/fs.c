@@ -18,9 +18,10 @@
 #include "../hle.h"
 #include "../rando.h"
 #include "../ipc.h"
-#include "../game_addresses.h"
 #include "../platform.h"
+#include "../game_addresses.h"
 #include "../romfs_build.h"
+#include "../ui/menu.h"
 
 #define FS_PATH_NOT_FOUND MAKE_RESULT(2, 1)
 #define FS_PATH_EXISTS MAKE_RESULT(2, 2)
@@ -28,6 +29,7 @@
 #define FS_NOT_EMPTY MAKE_RESULT(2, 8)
 
 const char *g_save_dir = "save";
+uint64_t g_romfs_bytes;
 
 // ------------------------------------------------------------------ the base RomFS image
 // The game reads its data as one raw RomFS image. It's served from the player's romfs/ folder: the header and tables
@@ -114,7 +116,11 @@ static void base_open(void) {
     char path[1100], why[256] = "";
     snprintf(path, sizeof path, "%s/region_common", g_romfs_dir);
     struct stat sb;
-    if (stat(path, &sb) == 0 && romfs_layout(g_romfs_dir, &g_base, why, sizeof why)) {
+    // LARECOMP_ROMFS_IMAGE=1: the image (romfs.bin) even with a romfs/ folder beside it - the headset has the whole image
+    // and only part of the folder (region_common, for other uses): served from the folder, the game crashed at boot
+    // reading files that weren't there (21/10)
+    const char *img = getenv("LARECOMP_ROMFS_IMAGE");
+    if (!(img && *img == '1') && stat(path, &sb) == 0 && romfs_layout(g_romfs_dir, &g_base, why, sizeof why)) {
         LOG("[fs] romfs: %d files served from %s\n", g_base.nfiles, g_romfs_dir);
     } else {
         snprintf(path, sizeof path, "%s.bin", g_romfs_dir);  // (an older version's image)
@@ -430,8 +436,8 @@ static void rom_index(void) {
     }
     if (ov_n) LOG("[fs] randomizer: %d romfs files replaced\n", ov_n);
     if (ov_meta) { patches[npatches++] = (Patch){ov_meta_off, ov_meta_size, ov_meta}; }
-    // The game's own files (before a seed's added files; the crash dialog checks them), their sizes summed, and the
-    // files that aren't the game's named. Copies of the game code at the root (game_romfs_exefs_copy) are left out.
+    // The game's own files (before a seed's added files; the crash dialog checks them), their sizes summed (the files
+    // that aren't the game's left out: issue #553), and the files that aren't the game's named. Copies of the game code at the root (game_romfs_exefs_copy) are left out.
     char game_dir[1100] = "";
     size_t dl = g_romfs_dir ? strlen(g_romfs_dir) : 0;
     if (dl > 6 && dl - 6 < sizeof game_dir && !strcmp(g_romfs_dir + dl - 6, "/romfs"))
@@ -441,8 +447,8 @@ static void rom_index(void) {
     rt_romfs_bytes = 0;
     for (int i = 0; i < rom_nfiles; i++) {
         if (game_dir[0] && game_romfs_exefs_copy(game_dir, rom_files[i].path, rom_files[i].size)) { copies++; continue; }
-        rt_romfs_bytes += rom_files[i].size;  // (the game's sizes, not a seed's)
-        if (!game_romfs_check_file(check, rom_files[i].path, rom_files[i].size) && odd++ < 20)
+        // (the game's sizes, not a seed's)
+        if (!game_romfs_check_file(check, rom_files[i].path, rom_files[i].size, &rt_romfs_bytes) && odd++ < 20)
             LOG("[fs] romfs: not one of the game's files: %s (%llu bytes)\n", rom_files[i].path,
                 (unsigned long long)rom_files[i].size);
     }
@@ -542,7 +548,9 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
         IpcBuf *b = out_buf(req, 0);
         if (!b) { resp->result = MAKE_RESULT(2, 6001); break; }
         if (size > b->size) size = b->size;
+        plat_guest_will_write(b->addr, size);  // (a pread into pages the write tracking may protect: held open)
         ssize_t n = romfs_read((uint8_t *)(uintptr_t)b->addr, size, off);
+        plat_guest_wrote(b->addr, size);
         if (n < 0) LOG("[fs] storage read failed at %llx: %s\n", off, strerror(errno));
         {
             const char *path = romfs_file_at(off);
@@ -550,12 +558,28 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
             if (path && path != last) {
                 last = path;
                 if (getenv("LARECOMP_LOG_FILES")) LOG("[fs] read %s\n", path);
+                const char *ls = getenv("LARECOMP_LOG_FILE_STACK");  // (research: who reads files whose path holds this)
+                if (ls && strstr(path, ls)) {
+                    Cpu *c = kernel_current_cpu();
+                    LOG("[fs] %s from", path);
+                    if (c) {
+                        LOG(" lr %llx", (unsigned long long)c->x[30]);
+                        uint64_t fp = c->x[29];
+                        for (int i = 0; i < 14 && fp >= GUEST_LO && fp < GUEST_HI; i++) {
+                            LOG(" %llx", (unsigned long long)*(const uint64_t *)(uintptr_t)(fp + 8));
+                            fp = *(const uint64_t *)(uintptr_t)fp;
+                        }
+                    }
+                    LOG("\n");
+                }
                 romfs_file_read_hook(path);
             }
         }
         static uint64_t reads, bytes;
+        extern uint64_t g_romfs_bytes;  // (the [hitch] log: game files read during a frame)
         reads++;
         bytes += size;
+        g_romfs_bytes += size;
         if ((reads & (reads - 1)) == 0) LOG("[fs] romfs reads: %llu (%llu KB)\n", reads, bytes >> 10);
         break;
     }
@@ -618,10 +642,7 @@ static void save_failed(HostFs *fs, const char *what, const char *path, int erro
     static bool told;
     if (told) return;
     told = true;
-    char text[1400];
-    snprintf(text, sizeof text, "Your game could not be saved (the game may still say it was). Your previous save "
-             "is unchanged.\n\nMake sure this folder can be written to and the disk has free space:\n%s", fs->root);
-    plat_notice(text);
+    menu_save_failed(fs->root);  // (the menu's notice, in its look)
 }
 
 static void sync_dir_of(const char *path) {
@@ -855,6 +876,7 @@ static void file(Service *s, IpcReq *req, IpcResp *resp) {
         if (f->dropped && f->fd < 0) { OUT(int64_t, 0) = 0; resp_size(resp, 8); break; }  // (nothing open: empty)
         plat_os_write(b->addr, (uint64_t)size);
         ssize_t n = pread(f->fd, (void *)(uintptr_t)b->addr, (size_t)size, off);
+        plat_guest_wrote(b->addr, (uint64_t)size);
         if (n < 0) resp->result = errno_result();
         if (n > 0 && !f->scratch && strstr(f->path, "savedata")) {
             LOG("[save] read %s off %lld size %lld -> guest %llx\n", f->path, (long long)off, (long long)size, (unsigned long long)b->addr);
@@ -862,6 +884,10 @@ static void file(Service *s, IpcReq *req, IpcResp *resp) {
             save_editor_file_read(f->path, b->addr, off, n);
             extern void flags_ext_save_read(const char *path, uint64_t addr, int64_t off, int64_t size);
             flags_ext_save_read(f->path, b->addr, off, n);
+            extern void dpad_items_save_read(const char *path, uint64_t addr, int64_t off, int64_t size);
+            dpad_items_save_read(f->path, b->addr, off, n);  // (runtime/hle/dpad_items.c)
+            extern void weather_cycle_save_read(const char *path, uint64_t addr, int64_t off, int64_t size);
+            weather_cycle_save_read(f->path, b->addr, off, n);  // (runtime/nvn/weather_cycle.c)
         }
         OUT(int64_t, 0) = n < 0 ? 0 : n;
         resp_size(resp, 8);
@@ -884,6 +910,10 @@ static void file(Service *s, IpcReq *req, IpcResp *resp) {
             extern bool flags_ext_save_written(const char *path, uint64_t addr, int64_t off, int64_t size);
             errno = 0;
             if (!flags_ext_save_written(f->path, a->addr, off, size)) error = errno ? errno : EIO;
+            extern void weather_cycle_save_written(const char *path, uint64_t addr, int64_t off, int64_t size);
+            if (!error) weather_cycle_save_written(f->path, a->addr, off, size);  // (runtime/nvn/weather_cycle.c)
+            extern void dpad_items_save_written(const char *path, uint64_t addr, int64_t off, int64_t size);
+            if (!error) dpad_items_save_written(f->path, a->addr, off, size);  // (runtime/hle/dpad_items.c)
         }
         if (error && f->fs) file_failed(f, "write", error);
         else if (error) { errno = error; resp->result = errno_result(); }

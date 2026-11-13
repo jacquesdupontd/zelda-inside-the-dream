@@ -173,6 +173,7 @@ void rt_level_request(Cpu *c) {
     uint64_t req = c->x[0];
     const char *lv = (const char *)(uintptr_t)(req + 0xa8);
     if (ENV("LARECOMP_LOG_LEVELREQ")) LOG("[levelreq] %s / %s\n", lv, (const char *)(uintptr_t)(req + 0xf0));
+    { extern void fp_level_requested(void); fp_level_requested(); }  // (firstperson.c: what he holds hidden at the door)
     { extern void pace_hitch(const char *why);  // nvn/pace.c
       pace_hitch("a level change"); }
     if (!g_run_active && layout_path() && !strcmp(lv, "Lv01TailCave") && chamber_load_file(layout_path()) == 0) {

@@ -1,0 +1,18 @@
+Inside The Dream - version PC (vue subjective, PC VR)
+Mod de vue subjective pour The Legend of Zelda: Link's Awakening, construit sur LAS Recomp de peiikai (MIT).
+
+1. Copier le dossier "Inside The Dream" ou vous voulez (il fait environ 7 Go).
+2. Double-cliquer sur "Installer Inside The Dream.cmd" : il cree le raccourci "Inside The Dream" sur le Bureau
+   et dans le menu Demarrer, puis ouvre l'ecran d'accueil du jeu.
+3. Ensuite, lancer le jeu par ce raccourci : JOUER sur l'ecran, ou JOUER EN VR avec un casque.
+
+Au casque (PC VR : SteamVR avec Steam Link, Quest Link / Air Link, Virtual Desktop...) : JOUER EN VR sur l'ecran
+d'accueil, ou directement "Inside The Dream VR.cmd".
+   - Bouton menu de la manette gauche, appui long : le menu (reglages, taille du monde, ranger les armes).
+     Appui bref : l'inventaire du jeu.
+   - Les deux sticks enfonces ensemble : l'ecran flottant (vue du dessus).
+   - Reglages > Video > Headset resolution : la finesse de l'image au casque (au prochain lancement en VR).
+
+Les sauvegardes sont dans le dossier "save", les reglages dans "larecomp.ini".
+Il faut une carte graphique avec un pilote Vulkan a jour (AMD, NVIDIA ou Intel recent).
+Si le dossier est deplace, relancer "Installer Inside The Dream.cmd" pour refaire les raccourcis.

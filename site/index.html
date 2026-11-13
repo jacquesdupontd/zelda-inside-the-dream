@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Zelda: Inside The Dream, the page's SKELETON (vcop2-opus, 12/11/2026). The [brackets] are filled at the chef's signal with
+     sideprojects-claude. Complete, simple sentences; nothing from Nintendo hosted here (the video's picture comes from
+     YouTube); nothing about the sound software seen at the start of the video. It can live in the project's own repository
+     (GitHub Pages, its own address) and be linked from a card on port0r.com. -->
+<title>Zelda: Inside The Dream</title>
+<meta name="description" content="Zelda: Inside The Dream lets you play Link's Awakening in first person, in VR on PC or on the screen on Windows, Linux and Mac. It is free and open source.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Anton&family=Barlow:ital,wght@0,400;0,500;0,600;0,700;1,600&display=swap">
+<style>
+:root {
+  --paper: #f4efe5; --paper-2: #ebe8e2; --card: #e3ece9; --ink: #0c0e12; --ink-2: #33363b; --ink-3: #55585c;
+  --accent: #2457b5; --accent-2: #3e93dc; --on-accent: #f4efe5; --hl: #a6e3f0; --todo: #fbe6a4; --red: #e0603a; --cyan: #6cc6ee;
+  --radius: 22px; --gutter: 16px;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0a1120; --paper-2: #101a2e; --card: #15233b; --ink: #f4efe5; --ink-2: #d5d2cb; --ink-3: #a9aaa8;
+    --accent: #6cc6ee; --accent-2: #a6e3f0; --on-accent: #0a1120; --hl: #2457b5; --todo: #5a4a1a; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0a1120; --paper-2: #101a2e; --card: #15233b; --ink: #f4efe5; --ink-2: #d5d2cb; --ink-3: #a9aaa8;
+  --accent: #6cc6ee; --accent-2: #a6e3f0; --on-accent: #0a1120; --hl: #2457b5; --todo: #5a4a1a; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 400 18px/1.55 Barlow, system-ui, sans-serif; }
+a { color: inherit; }
+.wrap { width: min(1120px, 100% - 2 * var(--gutter)); margin-inline: auto; }
+.top { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 0; }
+/* Port0r's logo as its own files (brand/logo/out of port0r.com, 13/11/2026: never a lookalike, never the old PORTØR) */
+.brand { display: inline-flex; line-height: 0; }
+.brand img { height: 34px; width: auto; }
+.top small { font-weight: 600; letter-spacing: .12em; text-transform: uppercase; font-size: 12px; color: var(--ink-3); }
+.kicker { font-weight: 700; letter-spacing: .14em; text-transform: uppercase; font-size: 13px; color: var(--ink-3); margin: 0 0 10px; }
+h1, h2 { font-family: Anton, sans-serif; font-weight: 400; text-transform: uppercase; line-height: 1.04; margin: 0; }
+h1 { font-size: clamp(44px, 11vw, 112px); }
+h2 { font-size: clamp(30px, 6vw, 54px); margin-bottom: 14px; }
+/* the highlight stays inside its own line (12/11: a full-height background ran over the line above) */
+.hl { background: linear-gradient(transparent 14%, var(--hl) 14%, var(--hl) 90%, transparent 90%); padding: 0 .1em; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+.lead { font-size: clamp(18px, 2.4vw, 22px); color: var(--ink-2); max-width: 46ch; margin: 18px 0 24px; }
+.todo { background: var(--todo); border-radius: 6px; padding: 0 .3em; }
+.hero { display: grid; gap: 28px; padding: 18px 0 40px; }
+@media (min-width: 900px) { .hero { grid-template-columns: 1fr 1.05fr; align-items: center; padding: 40px 0 64px; } }
+.row { display: flex; flex-wrap: wrap; gap: 10px; }
+.btn { display: inline-flex; align-items: center; gap: 8px; min-height: 48px; padding: 0 20px; border-radius: 999px;
+       background: var(--accent); color: var(--on-accent); font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+       font-size: 14px; text-decoration: none; }
+.btn.soft { background: var(--card); color: var(--ink); }
+.btn svg { width: 18px; height: 18px; }
+.stage { position: relative; aspect-ratio: 16 / 9; border-radius: var(--radius); overflow: hidden; background: #0c0e12; }
+.stage .ph { position: absolute; inset: 0; display: grid; place-items: center; color: #f4efe5; text-align: center; padding: 16px;
+             background: radial-gradient(120% 90% at 30% 20%, #2457b5 0%, #0a1120 70%); }
+.stage .play { width: 72px; height: 72px; border-radius: 50%; display: grid; place-items: center; background: var(--accent-2); color: #0a1120; margin: 0 auto 12px; }
+.band { background: var(--paper-2); padding: 48px 0; }
+.band.plain { background: var(--paper); }
+.cards { display: grid; gap: 14px; }
+@media (min-width: 760px) { .cards { grid-template-columns: repeat(3, 1fr); } }
+.card { background: var(--card); border-radius: var(--radius); padding: 22px; display: flex; flex-direction: column; gap: 10px; }
+.card h3 { font: 400 28px/1 Anton, sans-serif; text-transform: uppercase; margin: 0; }
+.card .spec { font-size: 14px; color: var(--ink-3); font-weight: 600; letter-spacing: .04em; margin: 0; }
+.card p { margin: 0; }
+.card .btn { margin-top: auto; align-self: flex-start; }
+.steps { display: grid; gap: 14px; }
+@media (min-width: 900px) { .steps { grid-template-columns: repeat(3, 1fr); } }
+.steps section { background: var(--card); border-radius: var(--radius); padding: 22px; }
+.steps h3 { margin: 0 0 8px; font-size: 20px; }
+.steps p { margin: 0 0 8px; }
+.prose { max-width: 70ch; }
+.prose p { margin: 0 0 12px; }
+footer { padding: 36px 0 48px; color: var(--ink-3); font-size: 15px; }
+footer p { margin: 0 0 8px; max-width: 80ch; }
+</style>
+</head>
+<body>
+<div class="wrap top">
+  <a class="brand" href="https://port0r.com" aria-label="Port0r"><picture><source srcset="port0r-logo-dark.svg" media="(prefers-color-scheme: dark)"><img src="port0r-logo-light.svg" alt="Port0r" height="34"></picture></a>
+  <small>A Port0r project</small>
+</div>
+
+<main>
+  <div class="wrap hero">
+    <div>
+      <p class="kicker">A Port0r project · Free and open source</p>
+      <h1>Zelda: Inside The <span class="hl">Dream</span></h1>
+      <p class="lead">Zelda: Inside The Dream lets you play The Legend of Zelda: Link's Awakening (2019) in first person, in VR on PC through SteamVR, or on the screen on Windows, Linux and Mac. It is built on LAS Recomp by Peiikai.</p>
+      <div class="row">
+        <a class="btn" href="#download">Download</a>
+        <a class="btn soft" href="#install">How to install</a>
+        <a class="btn soft" href="https://github.com/jacquesdupontd/zelda-inside-the-dream">The source code</a>
+      </div>
+    </div>
+    <div class="stage" aria-label="The video">
+      <div class="ph"><div><div class="play"><svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7z"/></svg></div><span class="todo" style="color:#0c0e12">[The YouTube video: its picture comes from YouTube]</span></div></div>
+    </div>
+  </div>
+
+  <section class="band" id="download" aria-labelledby="dl">
+    <div class="wrap">
+      <p class="kicker">Version 0.1.0</p>
+      <h2 id="dl">Download <span class="hl">it.</span></h2>
+      <div class="cards">
+        <article class="card">
+          <h3>Windows</h3>
+          <p class="spec">Windows 10 and 11 · 76 MB installer, or a 115 MB zip</p>
+          <p>You play it in VR through SteamVR, or on the screen.</p>
+          <a class="btn" href="https://github.com/jacquesdupontd/zelda-inside-the-dream/releases/tag/v0.1.0">Download for Windows</a>
+        </article>
+        <article class="card">
+          <h3>Linux</h3>
+          <p class="spec">x86-64 AppImage · 127 MB</p>
+          <p>You play it on the screen.</p>
+          <a class="btn" href="https://github.com/jacquesdupontd/zelda-inside-the-dream/releases/tag/v0.1.0">Download for Linux</a>
+        </article>
+        <article class="card">
+          <h3>Mac</h3>
+          <p class="spec">Apple Silicon, macOS 15 · 119 MB</p>
+          <p>You play it on the screen.</p>
+          <a class="btn" href="https://github.com/jacquesdupontd/zelda-inside-the-dream/releases/tag/v0.1.0">Download for Mac</a>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="band plain" id="install" aria-labelledby="inst">
+    <div class="wrap">
+      <h2 id="inst">Install <span class="hl">it.</span></h2>
+      <div class="prose">
+        <p>Inside The Dream doesn't include the game, and there is nothing from Nintendo in the downloads. You need your own copy of Link's Awakening for Nintendo Switch, as its extracted files: the exefs and romfs folders. We play and test with version 1.0.0, and versions 1.0.1 and 1.1.0 are accepted too. On the first launch, the app rebuilds the game's code for your own computer, once: it takes about seven minutes on a recent desktop PC, and it needs about 12 GB free.</p>
+        <p>On Windows and Linux, the game needs a 64-bit processor with AVX2 (Intel 4th generation or newer, or AMD Ryzen), a graphics card with Vulkan 1.3 and 8 GB of RAM. On a Mac, it needs Apple Silicon (M1 or newer) and macOS 15.</p>
+      </div>
+      <div class="steps">
+        <section><h3>Windows</h3><p>You run the installer, which puts an Inside The Dream shortcut on your desktop, or you unzip the zip and open lasrecomp.exe. On the first launch, you click Choose the folder, then Set up the game. To play in VR, you start SteamVR first, then you click PLAY IN VR.</p></section>
+        <section><h3>Linux</h3><p>You make the AppImage executable and open it, then you click Choose the folder and Set up the game. On the Steam Deck, you add it to Steam as a non-Steam game.</p></section>
+        <section><h3>Mac</h3><p>You open the .dmg and drag Inside The Dream into Applications. The first time, macOS may refuse it: you click Open Anyway in System Settings, Privacy &amp; Security.</p></section>
+      </div>
+    </div>
+  </section>
+
+  <section class="band" id="controls" aria-labelledby="ctl">
+    <div class="wrap"><div class="prose">
+      <h2 id="ctl">The <span class="hl">controls.</span></h2>
+      <p>You look around with the right stick or the mouse. R3 switches between the first-person view and the game's own view from above, and L3 or F5 puts the camera behind Link and back. In the headset, a long press on the left menu button opens the menu on the floating screen.</p>
+    </div></div>
+  </section>
+
+  <section class="band plain" id="credits" aria-labelledby="cr">
+    <div class="wrap"><div class="prose">
+      <h2 id="cr">Who <span class="hl">made it.</span></h2>
+      <p>Zelda: Inside The Dream is made by <span class="todo">[name]</span> as part of Port0r, and its whole source is open on GitHub. It is built on LAS Recomp by Peiikai, which recompiles the game for PC.</p>
+      <p>Port0r rebuilds arcade games in 3D for VR headsets, and they are all on <a href="https://port0r.com">port0r.com</a>.</p>
+    </div></div>
+  </section>
+</main>
+
+<footer class="wrap">
+  <p>The Legend of Zelda and Link's Awakening are trademarks of Nintendo. Zelda: Inside The Dream is a free fan project, not affiliated with or endorsed by Nintendo. It contains no Nintendo content.</p>
+  <p>Our code is under the MIT license, with LAS Recomp's own MIT notice. Every other component's license is in the repository.</p>
+</footer>
+</body>
+</html>

@@ -39,7 +39,7 @@ cp "$EXE" "$C/MacOS/lasrecomp"
 strip -S "$C/MacOS/lasrecomp"  # (debug-map entries only: the symbols crash reports name functions by stay)
 if [ -x "$HELPER/rando-gen" ]; then cp -R "$HELPER" "$C/Resources/rando-gen"; else echo "note: no $HELPER (make rando-helper)"; fi
 cp -R "$GEN_HELPER" "$C/Resources/lasgen"
-cp -R "$ZIG" "$C/Resources/zig"
+mkdir -p "$C/Resources/zig" && cp -R "$ZIG/" "$C/Resources/zig"  # (its contents: build/zig may be a link to another checkout's)
 mkdir "$C/Resources/gamelib-src"
 cp runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h tools/gamelib_entry.c runtime/hle/hle_symbols.txt \
    "$C/Resources/gamelib-src/"
@@ -47,6 +47,8 @@ cp docs/icon/icon.icns "$C/Resources/icon.icns"
 cp docs/icon/icon_1024.png "$C/Resources/icon.png"  # (window / Dock icon at run time)
 cp third_party/fonts/Baloo2/Baloo2-SemiBold.ttf "$C/Resources/Baloo2-SemiBold.ttf"  # (start screen; OFL, README "License")
 cp third_party/fonts/Baloo2/OFL.txt "$C/Resources/Baloo2-OFL.txt"
+cp third_party/fonts/Anton/Anton-Regular.ttf third_party/fonts/Barlow/Barlow-Bold.ttf third_party/fonts/Barlow/Barlow-SemiBold.ttf third_party/fonts/Barlow/Barlow-Medium.ttf docs/branding/itd-theme.wav docs/branding/port0r-logo-animation.mp4 docs/branding/port0r-wordmark-light.bmp "$C/Resources/"  # (Inside The Dream's start screen: OFL fonts, our wordmark)
+cp third_party/fonts/Anton/OFL-Anton.txt third_party/fonts/Barlow/OFL-Barlow.txt "$C/Resources/"
 cp third_party/fonts/DejaVu/DejaVuSans.ttf third_party/fonts/DejaVu/DejaVuSans-Bold.ttf "$C/Resources/"  # (last-resort fonts)
 cp third_party/fonts/DejaVu/LICENSE "$C/Resources/DejaVu-LICENSE.txt"
 
@@ -131,6 +133,15 @@ cat > "$C/Info.plist" <<EOF
 </plist>
 EOF
 printf 'APPL????' > "$C/PkgInfo"
+
+# FFmpeg's dylibs keep their configure line (avutil_configuration(): --prefix=<this machine's deps folder>), which names
+# this machine's user: the home folder blanked at the same length, before the signature (the check below refuses any
+# path of this machine; 13/11, Inside The Dream v0.1.0 - done by hand on 12/11 and lost)
+if [ "${CI:-}" != true ] && [ "${#HOME}" -gt 1 ]; then
+    while read -r f; do
+        HOME_PATH="$HOME" perl -0777 -pi -e 'BEGIN { $h = $ENV{HOME_PATH} } s{\Q$h\E}{"/" . ("x" x (length($h) - 1))}ge' "$f"
+    done < <(grep -rlaF -e "$HOME" "$C/Frameworks" 2>/dev/null)
+fi
 
 # ---- ad-hoc signature (Apple Silicon refuses to run unsigned code; the rewrites above invalidated the originals):
 # every Mach-O inside first, then the bundle

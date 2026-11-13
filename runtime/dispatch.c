@@ -1,6 +1,7 @@
 // Guest address -> recompiled function lookup, and host (HLE) function registry.
 #include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -97,26 +98,65 @@ uint64_t guest_sym(const char *name) {
     return a;
 }
 
-static uint64_t hle_next = HLE_HEAP;
-RT_ON_RESET(hle_heap_reset) { hle_next = HLE_HEAP; }  // (guest memory, wiped by the reboot)
+static uint64_t hle_used;  // (from HLE_HEAP: an offset, as the window can move - rt.h)
+RT_ON_RESET(hle_heap_reset) { hle_used = 0; }  // (guest memory, wiped by the reboot)
 
 void *hle_alloc(uint64_t size) {
     static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
     pthread_mutex_lock(&m);
-    uint64_t a = hle_next;
-    hle_next += (size + 63) & ~63ull;
-    if (hle_next > HLE_HEAP + HLE_HEAP_SIZE) FATAL("HLE heap exhausted\n");
+    uint64_t a = HLE_HEAP + hle_used;
+    hle_used += (size + 63) & ~63ull;
+    if (hle_used > HLE_HEAP_SIZE) FATAL("HLE heap exhausted\n");
     pthread_mutex_unlock(&m);
     plat_commit(a, size);
     memset((void *)a, 0, size);
     return (void *)a;
 }
 
+// A direct-mapped cache in front of the binary search, shared by every thread. Each entry is one 64-bit word: the
+// guest address's offset from the lowest function's (/4, +1: 0 is empty) in its high half, the host function's offset
+// from the lowest host function in its low half - so a thread reads another's entry whole or not at all, with no lock
+// and no thread-local storage. (It was a per-thread cache of 4096 entries: __thread is a call into the dynamic linker
+// on Android, and with the binary search behind the misses that was 7.7% of the Quest game thread's time, measured
+// 21/10.)
+#define DCACHE 16384
+static _Atomic uint64_t dcache[DCACHE];
+static uint64_t g_pc_base;   // the lowest guest function
+static uintptr_t g_fn_base;  // the lowest host function
+static bool g_dc_ok;         // every function fits an entry
+
+static inline unsigned dc_index(uint64_t k) { return (unsigned)((k >> 2) ^ (k >> 16)) & (DCACHE - 1); }
+
 void dispatch_init(void) {  // (after gamelib_load)
     const GameLibTables *g = gamelib_tables();
     uint64_t nm = *g->main_count, ns = *g->sdk_count;
+#ifdef LARECOMP_DYN_BASE
+    // The library lists the game's own addresses (gen.py --dyn-base): moved to where the window is (rt.h).
+    static uint64_t *moved[2];
+    const uint64_t *src[2] = {g->main_addrs, g->sdk_addrs}, cnt[2] = {nm, ns};
+    for (int t = 0; t < 2; t++) {
+        free(moved[t]);
+        moved[t] = malloc(cnt[t] * sizeof *moved[t]);
+        if (!moved[t]) FATAL("out of memory\n");
+        for (uint64_t i = 0; i < cnt[t]; i++) moved[t][i] = src[t][i] - GUEST_CANON + GUEST_LO;
+    }
+    tables[0] = (FnTable){moved[0], g->main_fns, nm, moved[0][0], moved[0][nm - 1]};
+    tables[1] = (FnTable){moved[1], g->sdk_fns, ns, moved[1][0], moved[1][ns - 1]};
+#else
     tables[0] = (FnTable){g->main_addrs, g->main_fns, nm, g->main_addrs[0], g->main_addrs[nm - 1]};
     tables[1] = (FnTable){g->sdk_addrs, g->sdk_fns, ns, g->sdk_addrs[0], g->sdk_addrs[ns - 1]};
+#endif
+    uint64_t lo = tables[0].lo < tables[1].lo ? tables[0].lo : tables[1].lo, hi = tables[0].hi > tables[1].hi ? tables[0].hi : tables[1].hi;
+    uintptr_t flo = UINTPTR_MAX, fhi = 0;
+    for (int t = 0; t < 2; t++)
+        for (uint64_t i = 0; i < tables[t].count; i++) {
+            uintptr_t f = (uintptr_t)tables[t].fns[i];
+            if (f < flo) flo = f;
+            if (f > fhi) fhi = f;
+        }
+    g_pc_base = lo, g_fn_base = flo;
+    g_dc_ok = hi - lo < (1ull << 33) && fhi - flo < (1ull << 32);
+    if (!g_dc_ok) LOG("[dispatch] functions too far apart for the call cache: every indirect call searched\n");
 }
 
 GuestFn dispatch_lookup(uint64_t addr) {
@@ -133,10 +173,6 @@ GuestFn dispatch_lookup(uint64_t addr) {
     }
     return NULL;
 }
-
-// Small direct-mapped cache in front of the binary search
-#define DCACHE 4096
-static __thread struct { uint64_t addr; GuestFn fn; } dcache[DCACHE];
 
 __attribute__((noinline)) static GuestFn dispatch_slow(Cpu *c) {
     uint64_t pc = c->pc;
@@ -157,9 +193,9 @@ __attribute__((noinline)) static GuestFn dispatch_slow(Cpu *c) {
         const char *s = loader_symbol_at(c->x[30], &off);
         FATAL("no function at %llx (lr=%llx %s+%llx)\n", pc, c->x[30], s ? s : "?", off);
     }
-    unsigned h = (unsigned)(pc >> 2) & (DCACHE - 1);
-    dcache[h].addr = pc;
-    dcache[h].fn = f;
+    uint64_t k = pc - g_pc_base;
+    if (g_dc_ok && k < (1ull << 33))
+        atomic_store_explicit(&dcache[dc_index(k)], ((k >> 2) + 1) << 32 | (uint64_t)((uintptr_t)f - g_fn_base), memory_order_relaxed);
     return f;
 }
 
@@ -173,9 +209,10 @@ __attribute__((noinline)) static void dispatch_miss(Cpu *c) {
 
 // Always tail-calls, so chains of indirect jumps don't grow the host stack.
 void rt_dispatch(Cpu *c) {
-    unsigned h = (unsigned)(c->pc >> 2) & (DCACHE - 1);
-    if (__builtin_expect(dcache[h].addr == c->pc, 1)) {
-        GuestFn f = dcache[h].fn;
+    uint64_t k = c->pc - g_pc_base;  // (an address below the base wraps far above any entry's)
+    uint64_t e = atomic_load_explicit(&dcache[dc_index(k)], memory_order_relaxed);
+    if (__builtin_expect(e >> 32 == (k >> 2) + 1, 1)) {
+        GuestFn f = (GuestFn)(g_fn_base + (uint32_t)e);
         __attribute__((musttail)) return f(c);
     }
     __attribute__((musttail)) return dispatch_miss(c);

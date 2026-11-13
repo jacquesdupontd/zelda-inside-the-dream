@@ -1,5 +1,5 @@
 // Speedrun overlays, drawn by menu.mm under the menu:
-//   the run timer (Gameplay tab "Timer"; runtime/hle/run_timer.c) in the bottom-left corner while Link is in play - the
+//   the run timer (General tab "Timer"; runtime/hle/run_timer.c) in the bottom-left corner while Link is in play - the
 //   game's HUD keeps the top (hearts, item buttons) and the bottom right (rupees) - on a small see-through parchment
 //   panel like the tracker's, gold once the run is finished
 //   the seed hash of a race seed (Randomizer tab "Race mode"; seed_hash.h) on the title / file select screen: five of
@@ -13,8 +13,12 @@
 #include <string>
 
 #include "imgui.h"
+#include "i18n.h"
 #include "seed_hash.h"
-#ifdef __APPLE__
+#if defined(__APPLE__) && !defined(LARECOMP_VULKAN)  // (the Mac draws with Metal, unless built with VK=1)
+#define UI_METAL 1
+#endif
+#ifdef UI_METAL
 #import <Metal/Metal.h>
 #endif
 
@@ -27,7 +31,7 @@ int run_timer_state(uint64_t *us, bool *counting);  // runtime/hle/run_timer.c
 bool inventory_items_page_shown(void);              // inventory_overlay.mm
 int texpatch_ui_rgba_list(const char *const *names, int n, uint8_t **out, int *w, int *h);  // runtime/nvn/texpatch.c
 uint64_t renderer_present_count(void);
-#ifdef __APPLE__
+#ifdef UI_METAL
 void *ui_metal_device(void);
 #else
 uint64_t vk_imgui_texture_rgba(const void *rgba, int w, int h);
@@ -60,7 +64,7 @@ struct Icon { ImTextureID id; int w, h; int state; };  // state 0 not loaded, 1 
 static Icon g_icons[32];
 
 static ImTextureID upload(const uint8_t *rgba, int w, int h) {
-#ifdef __APPLE__
+#ifdef UI_METAL
     id<MTLDevice> dev = (__bridge id<MTLDevice>)ui_metal_device();
     if (!dev) return (ImTextureID)0;
     MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
@@ -174,16 +178,17 @@ extern "C" void race_overlay_draw(ImVec2 display, ImFont *font, float scale) {
         load_icons(g_hash, 5);  // with their names
         float icon = 64 * scale, row = 76 * scale, pad = 18 * scale, label = 30 * scale, name = 34 * scale, gap = 14 * scale;
         float namew = 0;
-        for (int i = 0; i < 5; i++) namew = fmaxf(namew, font->CalcTextSizeA(name, FLT_MAX, 0, kSeedHashIcons[g_hash[i]].name).x);
-        float w = fmaxf(pad + icon + gap + namew + pad, pad + font->CalcTextSizeA(label, FLT_MAX, 0, "SEED HASH").x + pad);
+        const char *title = L("SEED HASH");
+        for (int i = 0; i < 5; i++) namew = fmaxf(namew, font->CalcTextSizeA(name, FLT_MAX, 0, L(kSeedHashIcons[g_hash[i]].name)).x);
+        float w = fmaxf(pad + icon + gap + namew + pad, pad + font->CalcTextSizeA(label, FLT_MAX, 0, title).x + pad);
         float h = pad + label + 8 * scale + 5 * row + pad * 0.5f;
         ImVec2 a(display.x - 24 * scale - w, (display.y - h) * 0.5f), b(a.x + w, a.y + h);
         dl->AddRectFilled(a, b, IM_COL32(12, 20, 16, 205), 14 * scale);
         dl->AddRect(a, b, IM_COL32(236, 194, 84, 200), 14 * scale, 0, fmaxf(1.0f, 2 * scale));
-        dl->AddText(font, label, ImVec2(a.x + pad, a.y + pad * 0.6f), IM_COL32(236, 194, 84, 255), "SEED HASH");
+        dl->AddText(font, label, ImVec2(a.x + pad, a.y + pad * 0.6f), IM_COL32(236, 194, 84, 255), title);
         for (int i = 0; i < 5; i++) {
             const Icon &ic = g_icons[g_hash[i]];
-            const char *nm = kSeedHashIcons[g_hash[i]].name;
+            const char *nm = L(kSeedHashIcons[g_hash[i]].name);
             ImVec2 p(a.x + pad, a.y + pad + label + 8 * scale + i * row + (row - icon) * 0.5f);
             if (ic.state == 1) {
                 float k = icon / (float)(ic.w > ic.h ? ic.w : ic.h);

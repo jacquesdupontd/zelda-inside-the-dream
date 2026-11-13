@@ -25,7 +25,11 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
         initial[i] = ch < 0x80 ? (char)ch : '?';
     }
     char text[96];
-    int ok = menu_keyboard_run(initial, max_len, text, sizeof text);
+    // No window (LARECOMP_OFFSCREEN: a headset - the Quest, PCVR): the menu's keyboard re-presents a window that isn't
+    // there - on Windows the driver crashed in it (26/10, a new file's name). The name the game proposes, else "Link".
+    int ok;
+    if (getenv("LARECOMP_OFFSCREEN")) ok = 1, snprintf(text, sizeof text, "%s", initial[0] ? initial : "Link");
+    else ok = menu_keyboard_run(initial, max_len, text, sizeof text);
     if (!ok) snprintf(text, sizeof text, "%s", initial);  // cancelled: keep what was there
     LOG("[swkbd] name entry (max %d, initial \"%s\"): %s \"%s\"\n", max_len, initial, ok ? "entered" : "cancelled", text);
     if (ptr && size) {

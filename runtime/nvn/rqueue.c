@@ -46,7 +46,10 @@ typedef struct {
     int up_kind;      // UPLOAD
     void *data;
     uint32_t w, h, stride, uv_off;
+    uint32_t view;    // the first-person view the game had when it queued this (runtime/hle/firstperson.c fp_view_gen)
 } Item;
+uint32_t fp_view_gen(void);
+void fp_view_pin(uint32_t gen);
 
 #define RQ_CAP 1024  // items queued at most (power of two)
 #define RQ_HIST 4096
@@ -57,6 +60,7 @@ static uint64_t enq_ns[RQ_HIST], done_ns[RQ_HIST];  // (LARECOMP_LOG_PACE fence 
 static uint64_t q_enq, q_done, q_cur;  // items queued / finished / in progress (0: none)
 static int presents_pending;
 static uint64_t last_present_q;  // (LARECOMP_LOG_PACE fence stats) the latest present's item
+static uint64_t prev_present_q;  // the present queued before it (LARECOMP_FRAME_AHEAD: rq_prev_present_gpu_seq)
 extern __thread uint64_t rq_fence_q;
 uint64_t rq_trace_t0;  // (debug: LARECOMP_RQ_TRACE's time base)
 static uint64_t exec_frame;  // (the render thread) the frame whose lists it runs now: see rq_frame
@@ -171,11 +175,14 @@ void rq_watch(const char *what, uint64_t arg) {
 
 // Wait on cv while !ready(arg); guest: give up while the kernel stops the threads. Caller holds the lock. A wait of
 // 2 s and more is logged with the queue's state (a stuck render thread shows up instead of a silent hang).
+static _Atomic int game_waiting;  // game threads waiting on the render thread (cv_done): rq_game_waiting
 static void wait_until(pthread_cond_t *cv, bool (*ready)(uint64_t), uint64_t arg, bool guest, const char *what) {
     uint64_t t0 = 0;
     bool warned = false;
     bool noted = what && !ready(arg);
     if (noted) rq_watch(what, arg);
+    bool counted = cv == &cv_done && !ready(arg);
+    if (counted) atomic_fetch_add(&game_waiting, 1);
     while (!ready(arg)) {
         if (guest && g_rt_unwind) break;
         struct timespec ts;
@@ -195,8 +202,10 @@ static void wait_until(pthread_cond_t *cv, bool (*ready)(uint64_t), uint64_t arg
                     (unsigned long long)q_cur, presents_pending);
         }
     }
+    if (counted) atomic_fetch_sub(&game_waiting, 1);
     if (noted) rq_watch(NULL, 0);
 }
+bool rq_game_waiting(void) { return atomic_load(&game_waiting) > 0; }
 
 static bool has_room(uint64_t a) { (void)a; return q_enq - q_done < RQ_CAP; }
 static bool no_present(uint64_t a) { (void)a; return presents_pending == 0; }
@@ -223,11 +232,13 @@ static uint64_t enqueue(const Item *it, const uint64_t *fences, int nfences) {
         if (!t0) t0 = plat_now_ns();
         wait_until(&cv_done, no_present, 0, true, "present (the previous one to finish)");
         presents_pending++;
+        prev_present_q = last_present_q;
         last_present_q = q_enq + 1;
     }
     if (t0) g_blocked_ns += plat_now_ns() - t0;  // (the pacer: as nextDrawable's wait was)
     uint64_t q = ++q_enq;
     items[q % RQ_CAP] = *it;
+    items[q % RQ_CAP].view = fp_view_gen();
     kind_of[q % RQ_HIST] = (uint8_t)it->kind;
     enq_ns[q % RQ_HIST] = plat_now_ns();
     if (nfences) {
@@ -243,6 +254,11 @@ static void *run(void *arg) {
     (void)arg;
     plat_thread_guest(44);  // (the game's GPU thread's class: performance cores on a Mac)
     plat_thread_perf_core(PLAT_PERF_RENDER);
+    plat_thread_name("nvn-render");
+    extern void (*g_thread_role_hook)(int kind);  // (an OpenXR shell: objects.c)
+    if (g_thread_role_hook) g_thread_role_hook(1);
+    extern void sampler_thread(int kind);
+    sampler_thread(1);  // (LARECOMP_SAMPLE=...:worker, Linux: runtime/sampler.c)
     is_render = true;
     rq_watch(NULL, 0);  // (registers this thread for the hang dump)
     for (;;) {
@@ -265,6 +281,10 @@ static void *run(void *arg) {
         if (stats < 0) stats = getenv("LARECOMP_LOG_PACE") != NULL;
         uint64_t c0 = stats ? plat_thread_cpu_ns() : 0, w0 = stats ? plat_now_ns() : 0;
         void *pool = backend_pool_push();
+        // (the first-person view the game had when it queued the item: read live, the view of the frame after could
+        // replace it part way through a frame - its depth pre-pass from one eye position, its colour pass from another,
+        // and the world black or half missing - runtime/hle/firstperson.c)
+        fp_view_pin(it.view);
         switch (it.kind) {
         case IT_EXEC: backend_execute(it.handle); break;
         case IT_PRESENT: backend_present_now(it.tex, it.frame); break;
@@ -378,14 +398,29 @@ void rq_upload(NvnTexture *t, int kind, void *data, uint32_t w, uint32_t h, uint
 
 // ---- waiting
 
+// The GPU submission the present before the latest one ended with, when it comes before item q (and is done: items
+// finish in order); else 0. (LARECOMP_FRAME_AHEAD, objects.c: the game's once-a-frame GPU wait waits for that frame.)
+uint64_t rq_prev_present_gpu_seq(uint64_t q) {
+    lock_timed();
+    uint64_t p = prev_present_q, gs = p && p < q && q_done >= p ? gpu_seq_of[p % RQ_HIST] : 0;
+    pthread_mutex_unlock(&lock);
+    return gs;
+}
+
 uint64_t rq_wait_item(uint64_t q) {
     uint64_t t0 = plat_now_ns(), gs;
     lock_timed();
     if (q > q_enq) q = q_enq;
+    extern uint64_t interp_replay_ns(uint64_t now);
+    uint64_t r0 = interp_replay_ns(t0);
     wait_until(&cv_done, item_done, q, true, "fence (its list not translated yet)");
     gs = q_done >= q ? gpu_seq_of[q % RQ_HIST] : renderer_issued_seq();  // (gave up: whatever is queued)
     pthread_mutex_unlock(&lock);
-    g_rq_wait_ns += plat_now_ns() - t0;
+    uint64_t t1 = plat_now_ns(), r1 = interp_replay_ns(t1);
+    g_rq_wait_ns += t1 - t0;
+    // (frame interpolation: the render thread's replays while this waited are the extra images' work, not the game's -
+    // the frame pacer counts that part as idle)
+    if (r1 > r0) g_blocked_ns += r1 - r0 < t1 - t0 ? r1 - r0 : t1 - t0;
     return gs;
 }
 
@@ -421,6 +456,12 @@ uint64_t rq_fence_seq(void) {
 }
 
 uint64_t rq_frame(void) { return exec_frame; }
+
+bool rq_present_is_repeat(void) {  // (the render thread, in a present) backend_represent's: the last frame again
+    if (!atomic_load(&started) || !pthread_equal(pthread_self(), thread)) return false;
+    const Item *it = &items[q_cur % RQ_CAP];
+    return it->kind == IT_PRESENT && !it->advance;
+}
 
 uint64_t rq_current_item(void) {
     if (!atomic_load(&started) || !pthread_equal(pthread_self(), thread)) return 0;

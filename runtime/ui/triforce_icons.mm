@@ -9,16 +9,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <map>
+#include <string>
 #include <vector>
 
 #include "imgui.h"
-#ifdef __APPLE__
+#if defined(__APPLE__) && !defined(LARECOMP_VULKAN)  // (the Mac draws with Metal, unless built with VK=1)
+#define UI_METAL 1
+#endif
+#ifdef UI_METAL
 #import <Metal/Metal.h>
 #endif
 
 extern "C" {
 uint8_t *texpatch_ui_rgba(const char *name, int *w, int *h);  // runtime/nvn/texpatch.c
-#ifdef __APPLE__
+#ifdef UI_METAL
 void *ui_metal_device(void);
 #else
 uint64_t vk_imgui_texture_rgba(const void *rgba, int w, int h);
@@ -26,7 +30,7 @@ uint64_t vk_imgui_texture_rgba(const void *rgba, int w, int h);
 }
 
 static ImTextureID upload(const std::vector<uint8_t> &rgba, int w, int h) {
-#ifdef __APPLE__
+#ifdef UI_METAL
     id<MTLDevice> dev = (__bridge id<MTLDevice>)ui_metal_device();
     if (!dev) return (ImTextureID)0;
     MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
@@ -37,6 +41,24 @@ static ImTextureID upload(const std::vector<uint8_t> &rgba, int w, int h) {
 #else
     return (ImTextureID)vk_imgui_texture_rgba(rgba.data(), w, h);
 #endif
+}
+
+// One of the game's own UI textures by name (Game.arc: item icons...), uploaded once and kept; 0 when it isn't there.
+// The touch controls draw the items on their buttons with these (runtime/ui/mobile/touch_controls.mm).
+ImTextureID ui_game_icon(const char *name) {
+    static std::map<std::string, ImTextureID> cache;
+    auto it = cache.find(name);
+    if (it != cache.end()) return it->second;
+    int w = 0, h = 0;
+    uint8_t *src = texpatch_ui_rgba(name, &w, &h);
+    ImTextureID id = (ImTextureID)0;
+    if (src && w > 0 && h > 0) {
+        std::vector<uint8_t> v(src, src + (size_t)w * h * 4);
+        id = upload(v, w, h);
+    }
+    free(src);
+    cache.emplace(name, id);
+    return id;
 }
 
 // RGBA float image (straight alpha)

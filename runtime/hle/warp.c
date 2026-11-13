@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "../hle.h"
+#include "../settings.h"  // (the remote's weather)
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static char g_level[64], g_locator[64];
@@ -23,6 +24,7 @@ static volatile int g_pending;
 static volatile uint64_t g_request;
 
 static uint64_t g_req;  // our level-jump request (HLE heap)
+static int g_place_queued, g_place_armed;  // (warp_request_place, below)
 static volatile int g_give_pending;
 // A warp waits for the one before it (issue #41: a jump handed to the game while its last one was still under way
 // crashed in its request processor, null+0x3f8): every level load registers a new request object (g_loads); after a
@@ -80,6 +82,7 @@ void warp_request(const char *level, const char *locator) {
     strlcpy(g_level, level, sizeof g_level);
     strlcpy(g_locator, locator, sizeof g_locator);
     g_pending = 1;
+    g_place_queued = g_place_armed = 0;  // (warp_request_place sets it again after this)
     pthread_mutex_unlock(&g_lock);
     LOG("[warp] queued %s / %s\n", level, locator);
 }
@@ -92,6 +95,12 @@ int game_in_play(void) {
     if (g_start_screen) return 0;
     uint64_t gm = LD64(GA(GAME_MGR));
     return gm && LD64(gm + 0x4b8) != 0;
+}
+
+// Read-only benchmark context. HP is stored in quarter-hearts in the live save
+// (same layout as runtime/ui/cheats.mm); a loaded player can still be dying.
+int game_health_quarters(void) {
+    return game_in_play() ? (int16_t)LD16(MAIN_BASE + 0x1CBB220 + 0x5544) : -1;
 }
 
 int warp_available(void) { return game_in_play(); }
@@ -110,6 +119,45 @@ bool warp_blocked(const char *locator) {
     return false;
 }
 int warp_busy(void) { return g_pending; }  // a queued warp not applied yet (shader tour)
+
+// A warp to a room with no arrival point of its own (the Warp tab's dungeon rooms): the jump goes to the nearest
+// arrival point of the level, then, once the level has loaded and settled, Link is moved onto a floor tile just inside
+// the room (the PlayerCollision position doorjump.c moves him by). The game sees him in that room and scrolls there,
+// as after a door jump.
+enum { PLACE_DELAY = 40, PLACE_TIMEOUT = 1500 };
+static int player_component_missing(void);
+static unsigned g_place_loads;
+static uint64_t g_place_since;
+static float g_place_pos[3];
+static char g_place_level[64];
+void warp_request_place(const char *level, const char *locator, float x, float y, float z) {
+    warp_request(level, locator);
+    pthread_mutex_lock(&g_lock);
+    g_place_queued = 1, g_place_armed = 0;
+    g_place_pos[0] = x, g_place_pos[1] = y, g_place_pos[2] = z;
+    strlcpy(g_place_level, level, sizeof g_place_level);
+    pthread_mutex_unlock(&g_lock);
+    LOG("[warp] then Link -> (%.2f, %.2f, %.2f)\n", x, y, z);
+}
+static void place_tick(uint64_t now) {
+    if (!g_place_armed) return;
+    if (now - g_place_since > PLACE_TIMEOUT) { g_place_armed = 0; LOG("[warp] room placement dropped (timeout)\n"); return; }
+    if (g_loads == g_place_loads || now - g_load_frame < PLACE_DELAY || g_change || player_component_missing()) return;
+    uint64_t ps = LD64(GA(PLAYER_STATUS_PTR));
+    if (!ps || strncmp((const char *)(uintptr_t)ps, g_place_level, sizeof g_place_level)) return;
+    extern void doorjump_player_rescan(void);
+    extern uint64_t doorjump_player(uint64_t frame);
+    static unsigned rescanned = ~0u;
+    if (rescanned != g_loads) rescanned = g_loads, doorjump_player_rescan();  // (a warp within the same level)
+    uint64_t pc = doorjump_player(now);
+    if (!pc) return;
+    float *pos = (float *)(uintptr_t)(pc + 0x80), *pos2 = (float *)(uintptr_t)(pc + 0xb0);
+    pos[0] = pos2[0] = g_place_pos[0];
+    pos[1] = pos2[1] = g_place_pos[1];
+    pos[2] = pos2[2] = g_place_pos[2];
+    g_place_armed = 0;
+    LOG("[warp] Link placed at (%.2f, %.2f, %.2f) in %s\n", g_place_pos[0], g_place_pos[1], g_place_pos[2], g_place_level);
+}
 
 // LARECOMP_WARP_AT=<frame>:<level>:<locator>[,<frame>:<level>:<locator>...]  (test hook)
 // LARECOMP_WARP_ON_LOAD=<level>:<locator>: warp once, ~1 s after a save is loaded (hand-off to the user)
@@ -203,8 +251,99 @@ static void shots_test(uint64_t frame) {
     }
 }
 
+// The remote (28/10/2026, the trailer's shooting - Guillaume: « tu vas m'y déplacer »): <data root>/remote.txt, written
+// from outside while the game runs (ssh), one command a line:
+//   warp <level> <locator>          a spawn point of runtime/ui/warp_data.h (the Warp tab's), e.g. "warp Field Field_01G"
+//   give <item> [count] [index]     an item through the game's own pickup (runtime/ui/item_names.h), e.g. "give 12"
+//   companion <n>                   who follows Link (runtime/hle/pets.c): 0 none, 1 BowWow, 2 Marin, 3 the Ghost,
+//                                   4 the Flying Rooster - "companion 0": BowWow, in the way of half the takes, sent off
+//   equip <Y slot> [<X slot>]       the items on Y and X: inventory slots (live save +0x5568 bits) 2 bombs, 3 bow,
+//                                   4 hook shot, 5 boomerang, 6 magic rod, 7 shovel, 8 powder, 9 Roc's feather,
+//                                   10 power bracelet, 11 Pegasus boots, 12 ocarina (live save +0x5562 Y, +0x5563 X)
+//   place <x> <z> [<y>]             Link put there in the level he is in, held 90 frames (doorjump.c) - a boss arena
+// Read twice a second; run in order, one every 20 frames once the game is in play (it takes one give at a time, and a
+// warp waits for the one before); the file removed once read. What was done goes to the log ([remote]).
+void give_item_request(int id, int count, int index);  // (below)
+static void remote_tick(uint64_t frame) {
+    static char q[32][192];
+    static int nq, qi;
+    static uint64_t last_poll, last_cmd;
+    {   // LARECOMP_REMOTE_AT=<frame>:<command>|<frame>:<command>... (the trailer's scripted shooting, 12/11): the same
+        // commands as remote.txt, each queued at its frame (frame order)
+        static const char *next;
+        static int init;
+        if (!init) init = 1, next = getenv("LARECOMP_REMOTE_AT");
+        long f;
+        int k;
+        while (next && *next && sscanf(next, "%ld:%n", &f, &k) == 1 && (long)frame >= f) {
+            const char *end = strchr(next, '|');
+            size_t n = end ? (size_t)(end - next - k) : strlen(next + k);
+            if (qi >= nq) nq = qi = 0;
+            if (nq < 32) {
+                if (n >= sizeof q[0]) n = sizeof q[0] - 1;
+                memcpy(q[nq], next + k, n), q[nq][n] = 0, nq++;
+            }
+            next = end ? end + 1 : NULL;
+        }
+    }
+    if (qi >= nq && frame - last_poll >= 30) {
+        last_poll = frame;
+        FILE *f = fopen("remote.txt", "r");
+        if (f) {
+            nq = qi = 0;
+            while (nq < 32 && fgets(q[nq], sizeof q[nq], f)) {
+                q[nq][strcspn(q[nq], "\r\n")] = 0;
+                if (q[nq][0] && q[nq][0] != '#') nq++;
+            }
+            fclose(f);
+            remove("remote.txt");
+            LOG("[remote] %d command(s)\n", nq);
+        }
+    }
+    if (qi >= nq || frame - last_cmd < 20 || g_pending || !game_in_play()) return;
+    last_cmd = frame;
+    const char *c = q[qi++];
+    char a[96], b[128];
+    int id, count = 1, index = -1;
+    if (sscanf(c, "warp %95s %127s", a, b) == 2) {
+        warp_request(a, b);
+        LOG("[remote] warp %s %s\n", a, b);
+    } else if (sscanf(c, "give %d %d %d", &id, &count, &index) >= 1) {
+        give_item_request(id, count, index);
+        LOG("[remote] give %d x%d (index %d)\n", id, count, index);
+    } else if (sscanf(c, "equip %d %d", &id, &count) >= 1) {
+        if (id >= 0) *(volatile uint8_t *)(uintptr_t)(GA(LIVE_SAVE) + 0x5562) = (uint8_t)id;
+        if (strchr(c + 6, ' ') && count >= 0) *(volatile uint8_t *)(uintptr_t)(GA(LIVE_SAVE) + 0x5563) = (uint8_t)count;
+        LOG("[remote] equip Y %d X %d\n", LD8(GA(LIVE_SAVE) + 0x5562), LD8(GA(LIVE_SAVE) + 0x5563));
+    } else if (!strncmp(c, "place ", 6)) {
+        float px, pz, py;
+        int n = sscanf(c + 6, "%f %f %f", &px, &pz, &py);
+        extern void doorjump_place_request(float x, float z, int has_y, float y);
+        if (n >= 2) doorjump_place_request(px, pz, n == 3, n == 3 ? py : 0);
+        LOG("[remote] place %s\n", c + 6);
+    } else if (sscanf(c, "companion %d", &id) == 1) {
+        extern void pets_call(int c);
+        pets_call(id);
+        LOG("[remote] companion %d\n", id);
+    } else if (!strcmp(c, "rec on") || !strcmp(c, "rec off")) {  // (the shooting, 12/11: each take started and stopped from
+        extern void rec_toggle(void);                              //  outside while he plays - runtime/record.h)
+        extern bool rec_active(void);
+        bool on = !strcmp(c, "rec on");
+        if (on != rec_active()) rec_toggle();
+        LOG("[remote] rec %s\n", on ? "on" : "off");
+    } else if (sscanf(c, "weather %95s", a) == 1) {  // off / rain / snow / storm / blizzard / random (settings.c, looks only)
+        static const char *const keys[] = {"off", "rain", "snow", "storm", "blizzard", "random"};
+        for (int i = 0; i < 6 && i < N_WEATHERS; i++)
+            if (!strcmp(a, keys[i])) g_settings.weather = i;
+        LOG("[remote] weather %s (%d)\n", a, g_settings.weather);
+    } else {
+        LOG("[remote] not understood: %s\n", c);
+    }
+}
+
 void warp_frame(uint64_t frame) {
     g_frame_now = frame;
+    remote_tick(frame);
     crash_test(frame);
     shots_test(frame);
     { extern void shader_tour_tick(uint64_t); shader_tour_tick(frame); }
@@ -264,6 +403,7 @@ static int player_component_missing(void) {
 void warp_game_tick(Cpu *c) {
     uint64_t now = g_frame_now;
     watch_level_change(now);
+    place_tick(now);
     if (!g_pending) return;
     if (g_warp_waiting && g_loads == g_loads_at_warp && now - g_warp_frame < WARP_TIMEOUT)
         return;  // (the last warp's level isn't loaded yet: this one stays queued)
@@ -295,6 +435,7 @@ void warp_game_tick(Cpu *c) {
     pthread_mutex_unlock(&g_lock);
     LOG("[warp] jumping to %s / %s\n", (char *)(uintptr_t)(req + 0xa8), (char *)(uintptr_t)(req + 0xf0));
     g_warp_waiting = 1, g_loads_at_warp = g_loads, g_warp_frame = now;
+    if (g_place_queued) g_place_queued = 0, g_place_armed = 1, g_place_loads = g_loads, g_place_since = now;
     uint64_t saved[31], sp = c->sp, pc = c->pc;
     memcpy(saved, c->x, sizeof saved);
     c->x[0] = req;
@@ -736,6 +877,7 @@ void give_item_tick(Cpu *c, uint64_t frame) {
     { extern void rescue_tick(uint64_t); rescue_tick(frame); }  // (softlock rescues: runtime/hle/rescue.c)
     pane_scan_tick(frame);
     { extern void doorjump_tick(uint64_t frame); doorjump_tick(frame); }
+    { extern void weather_player_tick(Cpu *, uint64_t frame); weather_player_tick(c, frame); }  // (after doorjump: Link found)
     { extern void pot_regrow_tick(uint64_t frame); pot_regrow_tick(frame); }  // (after doorjump: Link found)
     { extern void souls_tick(uint64_t frame); souls_tick(frame); }  // (boss / mini-boss souls: runtime/hle/souls.c)
     { extern void triforce_tick(void); triforce_tick(); }  // (Triforce hunt: the get message's flags, triforce.c)

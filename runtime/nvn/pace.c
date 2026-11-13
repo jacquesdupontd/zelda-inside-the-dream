@@ -8,6 +8,7 @@
 
 #include "../game_addresses.h"
 #include "../rt.h"
+#include "../settings.h"
 #include "pace.h"
 #include "slowframe.h"
 
@@ -78,8 +79,21 @@ static uint64_t stat_pace_over;
 // (game manager +0x4e2, normally 0) is 1 while slow, the game's own value again after. Re-asserted every frame while held.
 // Returns whether the game is held (not when it allows no 30 fps mode itself: its most, +0x4e3, is 0).
 #define FW_MIN_EXTRA_VSYNCS 0x4e2  // (+0x4e3: the most, 1 - its 30 fps mode; +0x4e0 / +0x4e1: the current choice)
+// Internal FPS target (Video settings): 30 keeps the game in its 30 fps mode, and "30 outdoors, 60 indoors" does it in
+// the overworld (the level Field: Mabe Village, the beaches, the forest...) and not in houses, caves and dungeons. 60
+// is the pacer's own choice as before. Dynamic resolution follows the same target (output_scale.c dyn_update).
+bool pace_target_30(void) {
+#ifdef PACE_TEST
+    return false;
+#else
+    extern const char *game_level_name(void);  // hle/widescreen.c
+    return g_settings.fps_target == FPS_TARGET_30 || (g_settings.fps_target == FPS_TARGET_MIXED && !strcmp(game_level_name(), "Field"));
+#endif
+}
+
 static bool hold_30(bool on) {
     static bool held;
+    on = on || pace_target_30();  // (the Internal FPS target: held whatever the pacer measures)
     static uint8_t saved;
 #ifdef PACE_TEST  // (tools/test_pace.c: a simulated game manager)
     extern uint64_t pace_test_game_mgr;
@@ -147,6 +161,9 @@ void pace_settings_changed(const char *what) {
 }
 
 bool pace_is_slow(void) { return pace_slow; }
+// LARECOMP_GAME_30 (a headset in stereo, exec.c): the game held in its 30 fps mode for good
+static bool pace_forced;
+void pace_hold_slow(void) { pace_forced = pace_slow = true; }
 uint64_t pace_frames_over(void) {
     uint64_t n = stat_pace_over;
     stat_pace_over = 0;
@@ -190,6 +207,11 @@ static uint64_t pace_scene(void) {
     return h ? h : 1;
 }
 
+// The game's own GPU time per frame (pace_frame's moving average, ms; -1: no GPU timer) - frame interpolation's
+// in-betweens get what is left of a frame (metal.m ip_present)
+static double gpu_avg = -1;
+double pace_gpu_frame_ms(void) { return gpu_avg; }
+
 void pace_frame(void) {
     spike_test();
     static int on = -1;
@@ -212,7 +234,6 @@ void pace_frame(void) {
     // (A frame's GPU time is read a few frames late and in bursts: the average smooths that.)
     extern int64_t pace_gpu_ns(void);
     static int64_t last_gpu = -1;
-    static double gpu_avg = -1;  // ms (-1: no GPU timer)
     int64_t gpu = pace_gpu_ns();
     double gpu_ms = gpu >= 0 && last_gpu >= 0 && gpu >= last_gpu ? (gpu - last_gpu) / 1e6 : -1;
     last_gpu = gpu;
@@ -330,7 +351,7 @@ void pace_frame(void) {
         if (back_at && now - back_at < 20000000000ull && backoff < 16) backoff *= 2;  // (flickering: wait longer)
         LOG("[pace] frames don't fit 60 fps (%d of the last 60 over 16.2 ms busy or shown late, %d by busy time, median %.1f): "
             "holding the game's 30 fps mode%s\n", nover, nbusy, med, backoff > 1 ? " (backing off)" : "");
-    } else if (pace_slow) {
+    } else if (pace_slow && !pace_forced) {
         float peak = 0;
         for (int i = 0; i < 60; i++) peak = recent[i] > peak ? recent[i] : peak;
         uint64_t sc = pace_scene();
@@ -353,7 +374,7 @@ void pace_frame(void) {
             LOG("[pace] %d frames with %s headroom on gameplay frames (%.1f ms a frame at 60 on average, median %.1f, at most "
                 "%.1f%s): back to the game's own choice\n", clear >= clear_n ? clear : calm, clear >= clear_n ? "clear" : "enough",
                 avg, med, peak, g);
-            pace_slow = false, nover = nbusy = 0, back_at = now;
+            pace_slow = pace_forced, nover = nbusy = 0, back_at = now;
             memset(over, 0, sizeof over);
             memset(recent, 0, sizeof recent);
         }

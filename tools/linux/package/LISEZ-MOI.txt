@@ -1,0 +1,15 @@
+Inside The Dream - version Linux et Steam Deck
+Mod de vue subjective pour The Legend of Zelda: Link's Awakening, construit sur LAS Recomp de peiikai (MIT).
+
+1. Copier le dossier "Inside The Dream" ou vous voulez (il fait environ 7 Go), par exemple dans /home/deck/Games sur un
+   Steam Deck. Sur un Steam Deck, faire tout cela en mode Bureau.
+2. Double-cliquer sur "Installer Inside The Dream.sh" (si le gestionnaire de fichiers demande : Executer). Il cree le
+   raccourci "Inside The Dream" dans le menu des applications et sur le Bureau, ajoute le jeu a Steam sur un Steam Deck
+   (bibliotheque, onglet Non-Steam), puis lance le jeu.
+3. Ensuite, lancer le jeu par ce raccourci, ou en mode Jeu depuis la bibliotheque Steam.
+
+Les sauvegardes sont dans le dossier "save", les reglages dans "larecomp.ini" (ou dans le jeu : Moins + Plus sur la
+manette, F1 ou Echap au clavier).
+Il faut un pilote Vulkan a jour (Mesa sur AMD et Intel, celui de NVIDIA sinon) : c'est le cas sur un Steam Deck.
+Si le dossier est deplace, relancer "Installer Inside The Dream.sh" pour refaire les raccourcis.
+Au premier lancement, le jeu prepare ses shaders : le monde peut rester noir sous les coeurs quelques secondes.

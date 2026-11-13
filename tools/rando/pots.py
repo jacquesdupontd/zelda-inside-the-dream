@@ -112,7 +112,8 @@ REFILLS = ('pot-arrows', 'pot-bombs', 'pot-powder')
 # Their pots aren't checks at all (vanilla contents, no gold): a check there could be lost for good (user 2026-10-18)
 MISSABLE_ROOMS = ('Lv07EagleTower_02E', 'Lv07EagleTower_06E')
 REFILL_INDEX = 80
-QUICK = ('pot-heart',) + REFILLS  # picked up like rupees: no item-get animation
+QUICK = ('pot-heart', 'apple', 'green-apple') + REFILLS  # picked up like rupees: no item-get animation (apples:
+# Applesanity's filler, apple_trees.py)
 # traps among the pot filler, by LAS's trap setting (fraction of the pot count; never the Zol trap - it needs a chest)
 POT_TRAPS = {'none': 0.0, 'few': 0.02, 'several': 0.06, 'many': 0.12, 'trapsanity': 0.25}
 FLAG_BASE = 1240  # first GlobalFlags index we may use (vanilla <= 1118, LAS adds ~100 after it)
@@ -124,15 +125,16 @@ def _and(*conds):
     return ' & '.join(f'({c})' for c in parts) if parts else None
 
 
-def scan(romfs, leb):
-    """All randomizable pots: list of dicts with level, room, key, pos."""
+def scan(romfs, leb, missable=MISSABLE_ROOMS):
+    """All randomizable pots: list of dicts with level, room, key, pos. missable: rooms whose pots stay vanilla
+    (room shuffle seeds: eagle_tower.MISSABLE_ROOMS_COLLAPSED - the tower starts collapsed)."""
     pots = []
     for f in sorted(glob.glob(os.path.join(romfs, 'region_common', 'level', '*', '*.leb'))):
         level = os.path.basename(os.path.dirname(f))
         if level.startswith(SKIP_LEVEL_PREFIX) or level in SKIP_LEVELS:
             continue
         room_name = os.path.basename(f)[:-4]
-        if room_name in MISSABLE_ROOMS:
+        if room_name in missable:
             continue
         with open(f, 'rb') as fh:
             room = leb.Room(fh.read())
@@ -239,14 +241,52 @@ def mark_refills(placements):
     return n
 
 
+def _snap_spot(room, x, y, z):
+    """Where a bush's / rock's item should stand: None when (x, z) is fine, else the centre of the nearest walkable
+    tile. The item spawns where its host stood, and one standing on a tile edge was hard to pick up (rock-03E-5 by the
+    Bottle Grotto door: on the line between a blocked tile and the one south of it, a wall on that line - Link had to
+    run back and forth over it; user, beta 6). The height stays: the grid's floor height isn't the ground's there (the
+    rock and Link stand at 13.125 where the grid says 13.49). Room grid: bushes._pit_tiles."""
+    import struct
+    g = next((e for e in room.fixed_hash.entries if e.name == b'grid'), None)
+    g = g and {e.name: e for e in g.data.entries}
+    if not g or b'info' not in g or b'data' not in g:
+        return None
+    rows, cols = struct.unpack_from('<HH', g[b'info'].data, 0)
+    ox, oz = struct.unpack_from('<2f', g[b'info'].data, 8)
+    raw = g[b'data'].data
+
+    def tile(c, r):  # (flags, floor height), None off the grid
+        if not (0 <= c < cols and 0 <= r < rows):
+            return None
+        return raw[0x10 * (r * cols + c)], struct.unpack_from('<f', raw, 0x10 * (r * cols + c) + 0xC)[0]
+    fx, fz = (x - ox) / 1.5, (z - oz) / 1.5
+    here = tile(int(fx // 1), int(fz // 1))
+    edge = min(fx % 1, 1 - fx % 1) < 0.01 or min(fz % 1, 1 - fz % 1) < 0.01
+    if here is None or not edge:
+        return None  # (off-centre but inside one tile: fine - e.g. rock-07F-1)
+    best = None
+    for c in range(int(fx // 1) - 1, int(fx // 1) + 2):
+        for r in range(int(fz // 1) - 1, int(fz // 1) + 2):
+            t = tile(c, r)
+            if t is None or t[0] & 3:  # (bit 0: pit / deep water, bit 1: collision)
+                continue
+            cx, cz = ox + (c + 0.5) * 1.5, oz + (r + 0.5) * 1.5
+            d = (cx - x) ** 2 + (cz - z) ** 2
+            if best is None or d < best[0] - 1e-6:
+                best = (d, cx, y, cz)
+    return best and best[1:]
+
+
 def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, data, flag_prefix='LARPot',
-          flag_base=FLAG_BASE, flag_limit=2048, key_tag=0x7A, hide_scale=HIDE_SCALE, cut_flag=False):
+          flag_base=FLAG_BASE, flag_limit=2048, key_tag=0x7A, hide_scale=HIDE_SCALE, cut_flag=False, drop_param=1):
     """Writes the item actors, event entry points and flags for every pot location (after LAS's ModsProcess).
     Also used for bushes (bushes.py): their own flag names / range (2048+: runtime/hle/flags_ext.c) and actor keys.
     cut_flag (bushes): a second flag per location, <prefix>Cut<n>, as the bush's switch 0: the game sets it when the
     bush is cut (and keeps a bush with it set cut), so the runtime knows to show the item full size (write_tsv;
     runtime/hle/pot_glow.c clears it again once Link has left, and the bush grows back). The bush drops nothing else
-    (a random rupee beside the small item was what players picked up)."""
+    (a random rupee beside the small item was what players picked up). drop_param: the host's ItemDrop parameter
+    (rocks: 0)."""
     common_out = os.path.join(out_dir, 'romfs', 'region_common')
     common_in = os.path.join(romfs, 'region_common')
 
@@ -321,6 +361,12 @@ def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, da
                 cut = next_flag
                 sheet['values'].append({'symbol': f'{flag_prefix}Cut{cut}', 'index': cut})
                 next_flag += 1
+            if cut_flag:  # (a bush / rock: its item stands where it stood - both moved, the runtime pairs them by position)
+                spot = _snap_spot(room, pot.posX, pot.posY, pot.posZ)
+                if spot:
+                    print(f'{name}: item spot ({pot.posX:g}, {pot.posY:g}, {pot.posZ:g}) -> ({spot[0]:g}, {spot[1]:g}, '
+                          f'{spot[2]:g})')
+                    pot.posX, pot.posY, pot.posZ = spot
             it = copy.deepcopy(pot)
             # the pot's own key under our tag: actor keys are unique per LEVEL, and a key a second room of the level
             # also uses spawns only once (issue #65: the item of the n-th pot of a room took the key of the n-th pot of
@@ -337,7 +383,7 @@ def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, da
             it.switches = [(4, 0), (4, 0), (4, 0), (4, 0)]
             if cut is not None:
                 pot.switches[0] = (1, cut)
-                pot.parameters[1] = b'None'  # (ItemDrop key: no random drop beside the check)
+                pot.parameters[drop_param] = b'None'  # (ItemDrop key: no random drop beside the check)
             s = data.MODEL_SIZES.get(model_name, 1.0) * hide_scale
             it.scaleX = it.scaleY = it.scaleZ = s
             if model_name in data.MODEL_ROTATIONS:

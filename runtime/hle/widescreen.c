@@ -94,7 +94,8 @@ float rt_aspect_site(int site) {
 float rt_cull_aspect(float orig) {
     static float last = -1;
     if (orig != last && ENV("LARECOMP_LOG_CULL")) { LOG("[widescreen] culling aspect field %f\n", orig); last = orig; }
-    return rt_aspect_site(6) * (orig > 0.1f && orig < 10.0f ? orig / (16.0f / 9.0f) : 1.0f);
+    extern float fp_cull_aspect_scale(void);  // (first-person view: the game culls with its own camera)
+    return rt_aspect_site(6) * (orig > 0.1f && orig < 10.0f ? orig / (16.0f / 9.0f) : 1.0f) * fp_cull_aspect_scale();
 }
 
 // Sky and sea pieces past the north edge (tools/patches.py SKYSEA_BOX_SITES): a piece shows while Link is within
@@ -114,6 +115,38 @@ float rt_fovy(float orig) {
     float half = (degrees ? orig * (float)M_PI / 180.0f : orig) * 0.5f;
     float wide = 2.0f * atanf(tanf(half) / g_wide);
     return degrees ? wide * 180.0f / (float)M_PI : wide;
+}
+
+// The main camera's fovy load (tools/patches.py), with the camera object: runtime/hle/firstperson.c looks at it.
+float rt_fovy_cam(uint64_t cam, float orig) {
+    extern void fp_game_camera(uint64_t cam);
+    extern float fp_cam_fovy(float);
+    fp_game_camera(cam);
+    return fp_cam_fovy(rt_fovy(orig));
+}
+
+// The main camera's update, before it builds the frame's view (tools/patches.py CAM_BEGIN_SITE).
+void rt_cam_begin(uint64_t cam) {
+    extern void fp_cam_begin(uint64_t cam);
+    fp_cam_begin(cam);
+}
+
+// A camera's frustum just computed by the render camera setup (tools/patches.py FRUSTUM_DONE_SITE).
+void rt_frustum_ready(uint64_t cam) {
+    extern void fp_frustum_ready(uint64_t cam);
+    fp_frustum_ready(cam);
+}
+
+// The game's sphere-against-frustum test, at its entry (tools/patches.py SPHERE_TEST_SITE): true leaves the model out.
+int rt_cull_sphere(uint64_t frustum, uint64_t sphere) {
+    extern bool fp_cull_sphere(uint64_t frustum, uint64_t sphere);
+    return fp_cull_sphere(frustum, sphere);
+}
+
+// The culling pass's fovy load (tools/patches.py): as the camera's, widened while the first-person view is on.
+float rt_cull_fovy(float orig) {
+    extern float fp_cull_fovy(float);
+    return fp_cull_fovy(rt_fovy(orig));
 }
 
 // Interiors: the indoor shadow setup runs while an interior is rendered (tools/patches.py).
@@ -150,6 +183,8 @@ static bool level_is_interior(void) {
 }
 
 bool widescreen_frame_boxed(uint64_t frame) {
+    extern bool fp_view_on(void);  // (first-person view: the whole image is the view)
+    if (fp_view_on()) return false;
     static bool last;
     static uint64_t interior_until;  // keep boxing briefly after leaving: the first (dark) frames still show stale sides
     bool in = level_is_interior();
@@ -217,6 +252,13 @@ static bool current_zone(float lo[3], float hi[3], uint32_t *id) {
     return true;
 }
 
+// A side-view passage (its zone thin in z) is where Link is: runtime/hle/firstperson.c keeps the game's camera.
+bool widescreen_side_view_zone(void) {
+    float lo[3], hi[3];
+    uint32_t id;
+    return current_zone(lo, hi, &id) && hi[2] - lo[2] < 6.0f;
+}
+
 // The current camera zone record (a dungeon room, an interior), 0 when there is none (overworld, title, loading).
 // (Frame pacing: runtime/nvn/pace.c - a room change is a new scene.)
 uint64_t game_camera_zone(void) {
@@ -230,6 +272,7 @@ uint64_t game_camera_zone(void) {
 // for the wide view, so a 16:9 box around a stale zone's centre cut Link out - user 2026-10-09), ROOM_KEEP when
 // there's no recent scene camera (keep the last choice; after half a second without one, e.g. menus: box).
 enum { ROOM_KEEP, ROOM_BOX, ROOM_CROP, ROOM_FULL };
+const char *game_level_name(void);
 static int room_crop(uint64_t frame, double shape, float *u0, float *u1) {
     float lo[3], hi[3];
     uint32_t id;
@@ -263,8 +306,10 @@ static int room_crop(uint64_t frame, double shape, float *u0, float *u1) {
         // holds whole shows black on both sides.
         float ndc[2];
         r = ROOM_CROP;
+        // The fishing pond is built 3 units past its zone's west edge (x -12), which its fixed camera never shows at 16:9
+        float west = side && !strcmp(game_level_name(), "FishingPond") ? 3.0f : 0.0f;
         for (int e = 0; e < 2; e++) {
-            float x = e ? cmax + mid16 : cmin - mid16;
+            float x = e ? cmax + mid16 : cmin - mid16 - west;
             float w = r3[0] * x + r3[1] * c[1] + r3[2] * c[2] + r3[3];
             if (!(w > 0.01f)) return ROOM_KEEP;
             ndc[e] = (r0[0] * x + r0[1] * c[1] + r0[2] * c[2] + r0[3]) / w;
@@ -300,11 +345,16 @@ void widescreen_present_crop(uint64_t frame, double shape, float crop[4], double
         if (game_in_play()) room_crop(frame, shape, &a, &b);
     }
     if (shape == 1.0 || !widescreen_frame_boxed(frame)) return;
+    extern void hud_corners_note_crop(uint64_t frame, float u0, float u1, float v0, float v1);
+    extern bool hud_corners_shown_whole(uint64_t frame);
     if (shape < 1.0) {
+        hud_corners_note_crop(frame, 0, 1, (float)((1.0 - shape) / 2), (float)((1.0 + shape) / 2));
+        if (hud_corners_shown_whole(frame)) return;  // (phones and tablets: the HUD in the bars, runtime/hle/hud_corners.c)
         crop[1] = (float)((1.0 - shape) / 2); crop[3] = (float)shape;
         double nh = *vh * shape; *vy += (*vh - nh) / 2; *vh = nh;
         return;
     }
+    double full_vx = *vx, full_vw = *vw;
     static int mode = ROOM_BOX;
     float u0 = 0, u1 = 1;
     static float k0, k1;  // (ROOM_KEEP: the last target)
@@ -323,8 +373,11 @@ void widescreen_present_crop(uint64_t frame, double shape, float crop[4], double
         cu0 = u0, cu1 = u1;
     }
     last = frame;
+    // (phones: the HUD at the screen corners, in the bars: the bars were cleared after the scene, runtime/hle/hud_corners.c)
+    hud_corners_note_crop(frame, cu0, cu1, 0, 1);
     crop[0] = cu0, crop[2] = cu1 - cu0;
     *vx += *vw * cu0, *vw *= cu1 - cu0;
+    if (hud_corners_shown_whole(frame)) crop[0] = 0, crop[2] = 1, *vx = full_vx, *vw = full_vw;
 }
 
 // Current level name for logs ("-" when not in play).

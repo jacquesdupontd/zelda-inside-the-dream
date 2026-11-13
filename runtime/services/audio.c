@@ -1,8 +1,10 @@
 // audren:u (audio renderer) and audout:u.
 #include <stdlib.h>
+#include <ctype.h>
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#include <stdatomic.h>
 #include <time.h>
 
 #include <SDL3/SDL.h>
@@ -16,7 +18,8 @@
 // third_party/ryujinx/LICENSE.txt).
 // Voices decode PCM16 / ADPCM wave buffers, resample to 48 kHz, and mix into their destination mix's
 // buffers; sub mixes route into their destination; the final mix feeds the device sink, which we
-// downmix to stereo and push to an SDL audio stream. Effects and splitters are not implemented.
+// downmix to stereo (or pass on as 5.1: Audio > Output) and push to an SDL audio stream. Effects and splitters
+// are not implemented.
 #define WB_COUNT 4
 #define MIXBUF_MAX 24
 #define HIST 4
@@ -87,11 +90,17 @@ typedef struct {
     uint8_t sink_used, sink_inputs, sink_input[6];
     Effect *fx;
     SDL_AudioStream *stream;
+    int out_ch;  // channels sent to the stream: 2, or 6 with Audio > Output 5.1
     FILE *wav;
     uint32_t wav_bytes;
+    int wav_ch;
     pthread_t thread;
     volatile bool quit;  // reboot (audio_reset)
 } Renderer;
+
+static atomic_bool g_paused;  // the app in the background (audio_set_background)
+static bool audio_paused(void) { return atomic_load(&g_paused); }
+static void audio_track_lock(bool on);
 
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
 
@@ -477,7 +486,7 @@ static void apply_effects(Renderer *r, int32_t mix_id, Mix *m) {
 static int hf_log = -1;
 static double hf[1024];
 
-static void render_frame(Renderer *r, float *stereo) {
+static void render_frame(Renderer *r, float *out, int out_ch) {
     if (hf_log < 0) hf_log = getenv("LARECOMP_AUDIO_HF") ? 1 : 0;
     uint32_t N = r->sample_count;
     for (uint32_t m = 0; m < r->nmix; m++)
@@ -589,7 +598,7 @@ static void render_frame(Renderer *r, float *stereo) {
                 }
         }
     }
-    // final mix -> device sink (FL FR FC LFE BL BR) -> stereo
+    // final mix -> device sink (FL FR FC LFE BL BR) -> stereo, or 5.1 as is (SDL3's 5.1 order is the same)
     Mix *f = find_mix(r, 0);
     if (f) apply_effects(r, 0, f);
     for (uint32_t i = 0; i < N; i++) {
@@ -597,17 +606,37 @@ static void render_frame(Renderer *r, float *stereo) {
         if (f && r->sink_used)
             for (int c = 0; c < r->sink_inputs && c < 6; c++)
                 if (r->sink_input[c] < f->bufs) ch[c] = f->buf[r->sink_input[c] * N + i] * f->volume;
+        if (out_ch == 6) {
+            for (int c = 0; c < 6; c++) out[i * 6 + c] = clampf(ch[c] / 32768.f, -1, 1);
+            continue;
+        }
         float L = ch[0], R = ch[1];
         if (r->sink_inputs >= 6) {
             L += 0.707f * ch[2] + 0.251f * ch[3] + 0.707f * ch[4];
             R += 0.707f * ch[2] + 0.251f * ch[3] + 0.707f * ch[5];
         }
-        stereo[i * 2] = clampf(L / 32768.f, -1, 1);
-        stereo[i * 2 + 1] = clampf(R / 32768.f, -1, 1);
+        out[i * 2] = clampf(L / 32768.f, -1, 1);
+        out[i * 2 + 1] = clampf(R / 32768.f, -1, 1);
     }
 }
 
 // Output gain: menu volume times LARECOMP_AUDIO_GAIN (applied live).
+void (*g_rec_audio_hook)(const void *data, int bytes);  // (the mixed output, also to a recording when set)
+// The recorder takes stereo floats: a 5.1 mix (SDL's order: front left, front right, centre, LFE, back left, back right)
+// folded down for it (-3 dB centre and backs, no LFE), the speakers keep their six channels
+static void rec_audio_stereo(const float *out, int bytes, int ch) {
+    if (ch == 2) { g_rec_audio_hook(out, bytes); return; }
+    float st[2 * 4096];
+    int n = bytes / (int)(ch * sizeof(float));
+    if (n > 4096) n = 4096;
+    for (int i = 0; i < n; i++) {
+        const float *f = out + i * ch;
+        st[2 * i] = f[0] + 0.7071f * (f[2] + f[4]);
+        st[2 * i + 1] = f[1] + 0.7071f * (f[2] + f[5]);
+    }
+    g_rec_audio_hook(st, n * 2 * (int)sizeof(float));
+}
+
 static void apply_gain(SDL_AudioStream *st) {
     static double env = -1;
     if (env < 0) env = getenv("LARECOMP_AUDIO_GAIN") ? atof(getenv("LARECOMP_AUDIO_GAIN")) : 1.0;
@@ -615,33 +644,48 @@ static void apply_gain(SDL_AudioStream *st) {
     if (st && SDL_GetAudioStreamGain(st) != g) SDL_SetAudioStreamGain(st, g);
 }
 
-static void wav_header(FILE *f, uint32_t bytes) {
-    uint32_t h[11] = {0x46464952, 36 + bytes, 0x45564157, 0x20746d66, 16, 0x00020003, 48000, 48000 * 8,
-                      0x00200008, 0x61746164, bytes};
+static void wav_header(FILE *f, uint32_t bytes, int ch) {
+    uint32_t h[11] = {0x46464952, 36 + bytes, 0x45564157, 0x20746d66, 16, 0x00000003 | (uint32_t)ch << 16, 48000,
+                      48000 * 4 * (uint32_t)ch, 0x00200000 | 4 * (uint32_t)ch, 0x61746164, bytes};
     fseek(f, 0, SEEK_SET);
     fwrite(h, 4, 11, f);
     fseek(f, 0, SEEK_END);
 }
 
+static void renderer_open_stream(Renderer *r);
+
+// Queued audio to keep ahead of the device, in bytes: >= 2 device periods.
+static int queue_target(Renderer *r, uint32_t N) {
+    int fb = (int)(N * r->out_ch * sizeof(float)), target = 4 * fb;
+    SDL_AudioSpec dev;
+    int dev_frames = 0;
+    if (r->stream && SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(r->stream), &dev, &dev_frames) && dev_frames > 0) {
+        int t = (2 * dev_frames * (int)r->sample_rate / (dev.freq ? dev.freq : 48000) + (int)N) * r->out_ch * (int)sizeof(float);
+        if (t > target) target = t;
+        LOG("[audren] device %d Hz, %d ch, %d frames/period; %d ch out, queue target %d samples\n", dev.freq,
+            dev.channels, dev_frames, r->out_ch, target / (r->out_ch * (int)sizeof(float)));
+    }
+    return target;
+}
+
 static void *renderer_tick(void *arg) {
     Renderer *r = arg;
-    float out[2 * 4096];
+    plat_thread_name("audio-render");
+    float out[6 * 4096];
     uint32_t N = r->sample_count > 4096 ? 4096 : r->sample_count;
-    int frame_bytes = (int)(N * 2 * sizeof(float));
     uint64_t next = 0;
     struct timespec now;
-    int target = 4 * frame_bytes;  // queued audio to keep ahead of the device: >= 2 device periods
-    if (r->stream) {
-        SDL_AudioSpec dev;
-        int dev_frames = 0;
-        if (SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(r->stream), &dev, &dev_frames) && dev_frames > 0) {
-            int t = (2 * dev_frames * (int)r->sample_rate / (dev.freq ? dev.freq : 48000) + (int)N) * 2 * (int)sizeof(float);
-            if (t > target) target = t;
-            LOG("[audren] device %d Hz, %d frames/period; queue target %d samples\n", dev.freq, dev_frames,
-                target / (2 * (int)sizeof(float)));
-        }
-    }
+    int target = queue_target(r, N);
     while (!r->quit) {
+        // Audio > Output changed: reopen the stream with the new channel count (what is queued is dropped)
+        if (r->out_ch != (g_settings.audio_out == AUDIO_OUT_51 ? 6 : 2)) {
+            audio_track_lock(true);  // (audio_set_background walks the streams)
+            if (r->stream) SDL_DestroyAudioStream(r->stream), r->stream = NULL;
+            renderer_open_stream(r);
+            audio_track_lock(false);
+            target = queue_target(r, N);
+        }
+        int frame_bytes = (int)(N * r->out_ch * sizeof(float));
         if (r->stream) {
             while (SDL_GetAudioStreamQueued(r->stream) >= target && !r->quit) {
                 struct timespec ts = {0, 1000000};
@@ -656,17 +700,18 @@ static void *renderer_tick(void *arg) {
         }
         pthread_mutex_lock(&r->lock);
         if (r->state == 0) {
-            render_frame(r, out);
+            render_frame(r, out, r->out_ch);
             r->elapsed_frames++;
         } else {
             memset(out, 0, frame_bytes);
         }
         pthread_mutex_unlock(&r->lock);
         if (r->stream) { apply_gain(r->stream); SDL_PutAudioStreamData(r->stream, out, frame_bytes); }
-        if (r->wav && r->state == 0) {
+        if (g_rec_audio_hook) rec_audio_stereo(out, frame_bytes, r->out_ch);  // (a recording: record_vk.c / metal.m, in stereo)
+        if (r->wav && r->state == 0 && r->wav_ch == r->out_ch) {  // (the channel count the file was started with)
             fwrite(out, 1, frame_bytes, r->wav);
             r->wav_bytes += frame_bytes;
-            if ((r->elapsed_frames & 255) == 0) { wav_header(r->wav, r->wav_bytes); fflush(r->wav); }
+            if ((r->elapsed_frames & 255) == 0) { wav_header(r->wav, r->wav_bytes, r->wav_ch); fflush(r->wav); }
         }
         pthread_mutex_lock(&g_klock);
         kernel_signal(r->event);
@@ -930,18 +975,103 @@ static void request_update(Renderer *r, IpcReq *req, IpcResp *resp) {
     (void)resp;
 }
 
-static void renderer_open_output(Renderer *r) {
-    if (getenv("LARECOMP_AUDIO_WAV")) {
-        r->wav = fopen(getenv("LARECOMP_AUDIO_WAV"), "wb");
-        if (r->wav) wav_header(r->wav, 0);
+// Inside The Dream, PC VR with the sound on the PC (the start screen's choice). Outputs a headset's runtime streams to, and
+// virtual ones (a cable, a mixer: nothing comes out of them by itself), are never "the PC's" by guess.
+static bool output_is(const char *name, const char *const *words) {
+    char l[256];
+    snprintf(l, sizeof l, "%s", name ? name : "");
+    for (char *p = l; *p; p++) *p = (char)tolower((unsigned char)*p);
+    for (int i = 0; words[i]; i++)
+        if (strstr(l, words[i])) return true;
+    return false;
+}
+static const char *const HEADSET_OUTPUTS[] = {"steam streaming", "oculus", "virtual desktop", "quest", "rift", "index", "vive", NULL};
+static const char *const VIRTUAL_OUTPUTS[] = {"cable", "vb-audio", "voicemeeter", "virtual", NULL};
+bool itd_headset_output(const char *name) { return output_is(name, HEADSET_OUTPUTS); }
+
+// The PC's output in PC VR: the one the start screen recorded (Windows's own while it was up, where its music played -
+// Guillaume, 12/11: « tu enregistres la sortie qui est en ce moment active et tu prends ça »), else the first real one.
+// The first output with no headset's name was a virtual cable on Raccoon (« CABLE Input (VB-Audio Virtual Cable) »):
+// no sound at all. 0 if none; SDL audio initialized by the caller.
+SDL_AudioDeviceID itd_pc_output(void) {
+    int n = 0;
+    SDL_AudioDeviceID *ids = SDL_GetAudioPlaybackDevices(&n), pick = 0;
+    for (int i = 0; ids && i < n && !pick && g_settings.itd_vr_audio_dev[0]; i++) {
+        const char *nm = SDL_GetAudioDeviceName(ids[i]);
+        if (nm && !strcmp(nm, g_settings.itd_vr_audio_dev)) pick = ids[i];
     }
+    for (int i = 0; ids && i < n && !pick; i++) {
+        const char *nm = SDL_GetAudioDeviceName(ids[i]);
+        if (!output_is(nm, HEADSET_OUTPUTS) && !output_is(nm, VIRTUAL_OUTPUTS)) pick = ids[i];
+    }
+    SDL_free(ids);
+    return pick;
+}
+
+// The output: LARECOMP_AUDIO_DEVICE (any part of its name, case ignored), or in a headset (LARECOMP_XR_RUNTIME: "<runtime> |
+// <system>", android/xr_app.c) the headset's own when its runtime streams to it - Steam Link "Steam Streaming Speakers",
+// Quest Link "Oculus Virtual Audio Device", Virtual Desktop - else the system's default (SteamVR makes a wired headset's
+// the default itself). Under Steam Link the default stayed the PC's speakers: the game was heard on the PC (Guillaume, 27/10).
+static SDL_AudioDeviceID playback_device(void) {
+    static SDL_AudioDeviceID pick = 0;
+    static bool done;
+    if (done) return pick ? pick : SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;
+    done = true;
+    const char *want = getenv("LARECOMP_AUDIO_DEVICE");
+    char rt[600] = "", w[128] = "";
+    const char *x = getenv("LARECOMP_XR_RUNTIME");
+    if (x) snprintf(rt, sizeof rt, "%s", x);
+    for (char *p = rt; *p; p++) *p = (char)tolower((unsigned char)*p);
+    if (!(want && *want) && *rt) {  // (by the runtime's name - "SteamVR/OpenXR | SteamVR/OpenXR : oculus" is a Quest on
+        //  Steam Link: the system part names the headset's maker, measured 27/10)
+        char *bar = strstr(rt, " | ");
+        const char *sys = bar ? bar + 3 : "";
+        if (bar) *bar = 0;
+        if (strstr(rt, "steamvr")) { if (strstr(sys, "oculus") || strstr(sys, "meta") || strstr(sys, "quest")) want = "steam streaming speakers"; }
+        else if (strstr(rt, "oculus") || strstr(rt, "meta")) want = "oculus virtual audio";
+        else if (strstr(rt, "virtual desktop") || strstr(rt, "vdxr")) want = "virtual desktop";
+    }
+    // (Inside The Dream: the start screen's "Sound in VR: PC" - the first output that isn't a headset's, not the headset's)
+    bool pc = *rt && !(getenv("LARECOMP_AUDIO_DEVICE") && *getenv("LARECOMP_AUDIO_DEVICE")) && g_settings.itd_vr_audio == 1;
+    if (pc) want = NULL, pick = itd_pc_output();
+    if (want) snprintf(w, sizeof w, "%s", want);
+    for (char *p = w; *p; p++) *p = (char)tolower((unsigned char)*p);
+    int n = 0;
+    SDL_AudioDeviceID *ids = SDL_GetAudioPlaybackDevices(&n);
+    for (int i = 0; ids && i < n; i++) {
+        const char *nm = SDL_GetAudioDeviceName(ids[i]);
+        char l[256];
+        snprintf(l, sizeof l, "%s", nm ? nm : "");
+        for (char *p = l; *p; p++) *p = (char)tolower((unsigned char)*p);
+        if (*rt || *w) LOG("[audio] output %d: %s\n", i, nm ? nm : "?");
+        if (*w && !pick && strstr(l, w)) pick = ids[i];
+    }
+    SDL_free(ids);
+    if (*rt || *w) LOG("[audio] output: %s%s%s%s%s\n", pick ? SDL_GetAudioDeviceName(pick) : "the system's default", *w ? " - asked: " : "", w,
+                       pc ? " - on the PC, recorded by the start screen: " : "", pc ? g_settings.itd_vr_audio_dev : "");
+    return pick ? pick : SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;
+}
+
+// 5.1: the stream takes the sink's six channels and SDL fits them to the device (a stereo device gets SDL's own
+// downmix). Stereo: our downmix above, as before.
+static void renderer_open_stream(Renderer *r) {
+    r->out_ch = g_settings.audio_out == AUDIO_OUT_51 ? 6 : 2;
     if (getenv("LARECOMP_NO_AUDIO") && strcmp(getenv("LARECOMP_NO_AUDIO"), "0")) return;
     if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) { LOG("[audren] SDL audio init failed: %s\n", SDL_GetError()); return; }
-    SDL_AudioSpec spec = {SDL_AUDIO_F32, 2, (int)r->sample_rate};
-    r->stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
+    SDL_AudioSpec spec = {SDL_AUDIO_F32, r->out_ch, (int)r->sample_rate};
+    r->stream = SDL_OpenAudioDeviceStream(playback_device(), &spec, NULL, NULL);
     if (!r->stream) { LOG("[audren] SDL audio open failed: %s\n", SDL_GetError()); return; }
     if (getenv("LARECOMP_AUDIO_GAIN")) SDL_SetAudioStreamGain(r->stream, (float)atof(getenv("LARECOMP_AUDIO_GAIN")));
-    SDL_ResumeAudioStreamDevice(r->stream);
+    if (!audio_paused()) SDL_ResumeAudioStreamDevice(r->stream);  // (opened paused: in the background it stays so)
+}
+
+static void renderer_open_output(Renderer *r) {
+    renderer_open_stream(r);
+    if (getenv("LARECOMP_AUDIO_WAV")) {  // (what the stream gets: 2 or 6 channels, as Audio > Output is now)
+        r->wav = fopen(getenv("LARECOMP_AUDIO_WAV"), "wb");
+        r->wav_ch = r->out_ch;
+        if (r->wav) wav_header(r->wav, 0, r->wav_ch);
+    }
 }
 
 static void audio_renderer(Service *s, IpcReq *req, IpcResp *resp) {
@@ -983,7 +1113,10 @@ static void audio_device(Service *s, IpcReq *req, IpcResp *resp) {
         break;
     }
     case 4: case 11: case 12: resp->copy_handles[resp->ncopy++] = new_event_handle(); break;
-    case 5: OUT(uint32_t, 0) = 2; resp_size(resp, 4); break;  // GetActiveChannelCount
+    case 5:  // GetActiveChannelCount (the game doesn't ask: it always mixes 5.1)
+        OUT(uint32_t, 0) = g_settings.audio_out == AUDIO_OUT_51 ? 6 : 2;
+        resp_size(resp, 4);
+        break;
     case 8: OUT(float, 0) = 1.0f; resp_size(resp, 4); break;
     default: break;
     }
@@ -1056,6 +1189,24 @@ static void audio_track(Renderer *r, AudioOut *a) {
     }
     pthread_mutex_unlock(&g_track_lock);
 }
+static void audio_track_lock(bool on) { on ? pthread_mutex_lock(&g_track_lock) : pthread_mutex_unlock(&g_track_lock); }
+
+// The app in the background (iOS: runtime/nvn/metal.m background_watch). An app allowed background audio - a
+// UIBackgroundModes audio entry, as LiveContainer's own Info.plist has - kept playing the game's sound from the home
+// screen: every output is paused then and resumed in front. Their threads stop with them (they wait while the
+// stream's queue is full), as the game does in its present; outputs opened meanwhile start paused.
+void audio_set_background(bool bg) {
+    pthread_mutex_lock(&g_track_lock);
+    atomic_store(&g_paused, bg);
+    int n = 0;
+    for (int i = 0; i < 8; i++) {
+        SDL_AudioStream *st[2] = {g_rens[i] ? g_rens[i]->stream : NULL, g_outs[i] ? g_outs[i]->stream : NULL};
+        for (int k = 0; k < 2; k++)
+            if (st[k]) bg ? SDL_PauseAudioStreamDevice(st[k]) : SDL_ResumeAudioStreamDevice(st[k]), n++;
+    }
+    pthread_mutex_unlock(&g_track_lock);
+    LOG("[audio] %s: %d outputs\n", bg ? "in the background, paused" : "in front, resumed", n);
+}
 
 static void audout_free(AudioOut *a) {
     a->quit = true;
@@ -1087,7 +1238,7 @@ RT_ON_RESET(audio_reset) {
             r->quit = true;
             pthread_join(r->thread, NULL);
             if (r->stream) SDL_DestroyAudioStream(r->stream);
-            if (r->wav) { wav_header(r->wav, r->wav_bytes); fclose(r->wav); }
+            if (r->wav) { wav_header(r->wav, r->wav_bytes, r->wav_ch); fclose(r->wav); }
             for (uint32_t m = 0; m < r->nmix; m++) free(r->mix[m].buf);
             free(r->voice), free(r->chres), free(r->chst), free(r->mix), free(r->fx);  // (reverb delay lines leak)
             free(r);
@@ -1099,10 +1250,18 @@ RT_ON_RESET(audio_reset) {
     LOG("[audio] reboot: %d outputs closed\n", n);
 }
 
+// A reboot, before the renderer lets the guest heap go (runtime/main.c teardown): with it placed as GPU memory
+// (VK_EXT_map_memory_placed, Turnip) it's unmapped there, and a renderer thread still mixing the game's voices read it
+// after, a crash on "back to the start screen" with sound playing. Safe to run again with the other resets. (From
+// mamcjr's LASRecompAndroid, MIT.) Every platform since 13/11: Linux places the heap too (RADV, VK_EXT_map_memory_placed),
+// and the randomizer's switch to a seed crashed there in decode_voice; elsewhere it only stops the sound a little sooner.
+void audio_stop_all(void) { audio_reset(); }
+
 // Buffers are copied into an SDL stream and released once the stream has drained below its target, so the
 // stream plays the role of the hardware queue. Without a device, buffers are released in real time.
 static void *audout_thread(void *arg) {
     AudioOut *a = arg;
+    plat_thread_name("audio-out");
     uint32_t ch = a->channels ? a->channels : 2;
     int target = 0;
     if (a->stream) {
@@ -1226,10 +1385,10 @@ SERVICE("audout:u", audout_u) {
         if (getenv("LARECOMP_AUDOUT_WAV")) a->wav = fopen(getenv("LARECOMP_AUDOUT_WAV"), "wb");
         if (!(getenv("LARECOMP_NO_AUDIO") && strcmp(getenv("LARECOMP_NO_AUDIO"), "0")) && SDL_InitSubSystem(SDL_INIT_AUDIO)) {
             SDL_AudioSpec spec = {SDL_AUDIO_S16, (int)a->channels, (int)a->rate};
-            a->stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
+            a->stream = SDL_OpenAudioDeviceStream(playback_device(), &spec, NULL, NULL);
             if (a->stream) {
                 if (getenv("LARECOMP_AUDIO_GAIN")) SDL_SetAudioStreamGain(a->stream, (float)atof(getenv("LARECOMP_AUDIO_GAIN")));
-                SDL_ResumeAudioStreamDevice(a->stream);
+                if (!audio_paused()) SDL_ResumeAudioStreamDevice(a->stream);
             }
         }
         pthread_create(&a->thread, NULL, audout_thread, a);

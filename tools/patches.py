@@ -48,6 +48,45 @@ def _cull_aspect(gen, a):
 PATCHES[CULL_ASPECT] = _cull_aspect
 
 
+# The island's spatial tree, queried with a box (f_70008f0f60: f_70008e76e0 walks the nodes the box overlaps and calls
+# back for each, which creates the terrain cells there): right after the game's own query, runtime/hle/firstperson.c
+# may give a second box, far ahead in the first-person view - the game loads the cells there with its own models,
+# without the ones between (Guillaume, 20/10: « afficher des cases ultra lointaines sans afficher les cases entre »).
+FAR_QUERY_SITE = 0x70008f0fd4
+
+
+def _far_query(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xf94013e0, hex(w)  # ldr x0, [sp, #0x20] (after bl f_70008e76e0)
+    return ('{ extern uint64_t rt_far_query(uint64_t lr, uint64_t query); '
+            'uint64_t q = rt_far_query(LD64(c->sp + 0x58), c->x[20]); '
+            'if (q) { c->x[0] = c->x[22]; c->x[1] = c->x[19] + 0x18; c->x[2] = c->x[19]; c->x[3] = q; c->x[4] = c->sp; '
+            'c->x[30] = 0x70008f0fd4ull; f_70008e76e0(c); } } '
+            '{ uint64_t ea = c->sp + 0x20ull; uint64_t v = LD64(ea); c->x[0] = (uint64_t)(v); }'
+            f'  /* {a:#x}: ldr x0, [sp, #0x20] (the tree query: a far box after the game\'s) */')
+
+
+PATCHES[FAR_QUERY_SITE] = _far_query
+
+
+# The island's cells update (f_700085c280, called from f_70008529b0 with x1 = the camera from above's culling frustum,
+# x27 + 0x610): after loading, it hides the loaded cells - their models and actors - whose box that frustum misses (a 4th
+# tree query; read by Gemini 27/10). runtime/hle/firstperson.c may hand it another frustum: in first person, every cell
+# loaded is shown and the eye's own frustum chooses what is drawn. The instruction kept: bl f_700085c280.
+CELLS_UPDATE_SITE = 0x7000852d10
+
+
+def _cells_update(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x9400255c, hex(w)  # bl 0x700085c280
+    return ('{ extern uint64_t rt_cells_frustum(uint64_t); uint64_t f = rt_cells_frustum(c->x[1]); if (f) c->x[1] = f; } '
+            '{ extern void f_700085c280(Cpu *); c->x[30] = 0x7000852d14ull; f_700085c280(c); }'
+            f'  /* {a:#x}: bl 0x700085c280 (the cells update, with the frustum that hides cells) */')
+
+
+PATCHES[CELLS_UPDATE_SITE] = _cells_update
+
+
 # Vertical field of view (camera field +0x564): taller-than-16:9 outputs keep the designed horizontal view
 # and widen the vertical one ("Vert+"). Loaded by the main camera and by the culling pass.
 FOVY_SITES = {A.FOVY_SITES_0: (0xbd4566e0, 23), A.FOVY_SITES_1: (0xbd456768, 27)}
@@ -58,8 +97,13 @@ def _fovy_load(gen, a):
     want, rn = FOVY_SITES[a]
     assert w == want, hex(w)
     rt = w & 31
-    return ('{ extern float rt_fovy(float); float o; '
-            f'memcpy(&o, (const void *)(uintptr_t)(c->x[{rn}] + 0x564), 4); float f = rt_fovy(o); '
+    if a == 0x7000010914:  # the main camera: its object goes to the runtime too (first-person view, rt_fovy_cam)
+        return ('{ extern float rt_fovy_cam(uint64_t, float); float o; '
+                f'memcpy(&o, (const void *)(uintptr_t)(c->x[{rn}] + 0x564), 4); float f = rt_fovy_cam(c->x[{rn}], o); '
+                f'c->v[{rt}] = 0; memcpy(&c->v[{rt}], &f, 4); }}  /* {a:#x}: ldr s{rt}, [x{rn}, #0x564] (fovy) */')
+    fn = 'rt_cull_fovy' if a == 0x7000852ad0 else 'rt_fovy'  # (culling: widened in first-person view)
+    return (f'{{ extern float {fn}(float); float o; '
+            f'memcpy(&o, (const void *)(uintptr_t)(c->x[{rn}] + 0x564), 4); float f = {fn}(o); '
             f'c->v[{rt}] = 0; memcpy(&c->v[{rt}], &f, 4); }}  /* {a:#x}: ldr s{rt}, [x{rn}, #0x564] (fovy) */')
 
 
@@ -67,10 +111,62 @@ for _a in FOVY_SITES:
     PATCHES[_a] = _fovy_load
 
 
+# The main camera's update (f_7000010540), right after it takes the camera object and before it builds the frame's
+# view from its eye (+0x320) and target (+0x3f0): the runtime may move them there (first-person view: which camera
+# chooses the island cells the game draws?). The instruction kept: ldr x24, [x23, #0x2a8].
+CAM_BEGIN_SITE = 0x70000105dc
+
+
+def _cam_begin(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xf94156f8, hex(w)
+    return ('{ extern void rt_cam_begin(uint64_t); rt_cam_begin(c->x[23]); } '
+            '{ uint64_t ea = c->x[23] + 0x2a8ull; uint64_t v = LD64(ea); c->x[24] = (uint64_t)(v); }'
+            f'  /* {a:#x}: ldr x24, [x23, #0x2a8] (the main camera, before its view is built) */')
+
+
+PATCHES[CAM_BEGIN_SITE] = _cam_begin
+
+
+# The render camera setup (f_7001025c30) right after it computes a camera's frustum (f_700112f5c0 on x19 + 0xe0: a
+# world box at +0xe0 / +0xf0, six planes from +0x100, their count at +0x1c0): the runtime may replace them before
+# anything is culled with them (first-person view: the game culls with what Link's eye sees). The instruction kept:
+# b 0x7001025ec4.
+FRUSTUM_DONE_SITE = 0x7001026834
+
+
+def _frustum_done(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x17fffda4, hex(w)
+    return ('{ extern void rt_frustum_ready(uint64_t); rt_frustum_ready(c->x[19]); } goto L_7001025ec4;'
+            f'  /* {a:#x}: b 0x7001025ec4 (a camera frustum just computed) */')
+
+
+PATCHES[FRUSTUM_DONE_SITE] = _frustum_done
+
+
+# The sphere-against-frustum test (f_7001130090: x0 a frustum, x1 a sphere - centre, radius at +0x10; returns 1 when
+# inside), at its first instruction: the runtime may leave a model out before the planes are tried (first-person view:
+# small things far away). The instruction kept: ldrsw x8, [x0, #0xe0] (the planes' count).
+SPHERE_TEST_SITE = 0x7001130090
+
+
+def _sphere_test(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xb980e008, hex(w)
+    return ('{ extern int rt_cull_sphere(uint64_t, uint64_t); if (rt_cull_sphere(c->x[0], c->x[1])) { c->x[0] = 0; return; } } '
+            '{ uint64_t ea = c->x[0] + 0xe0ull; uint64_t v = (uint64_t)(int64_t)(int32_t)LD32(ea); c->x[8] = (uint64_t)(v); }'
+            f'  /* {a:#x}: ldrsw x8, [x0, #0xe0] (a sphere against a frustum) */')
+
+
+PATCHES[SPHERE_TEST_SITE] = _sphere_test
+
+
 # Sky and sea beyond the overworld's north edge (MapSkySea, map/SkySea.bfres): pieces 60 apart, each drawn only while
 # Link stands inside its box, the piece's centre +-(67.5, 50, 27) - its own reach plus half a 16:9 view. With a wider
 # view the next piece is needed sooner: at 32:9 the screen beside Link's showed black (no sky, no sea) until Link came
-# within 67.5. The box's across bounds are widened by the extra view (runtime/hle/widescreen.c rt_skysea_margin).
+# within 67.5. The box's across bounds are widened by the extra view (runtime/hle/widescreen.c rt_skysea_margin); in
+# first person the piece shows with the island's block that reaches it (runtime/hle/firstperson.c fp_skysea_box).
 SKYSEA_BOX_SITES = {A.SKYSEA_BOX_MAX_SITE: (0x3dc0bae1, 0x2e0, 1.0), A.SKYSEA_BOX_MIN_SITE: (0x3dc0b6e2, 0x2d0, -1.0)}
 
 
@@ -79,8 +175,9 @@ def _skysea_box(gen, a):
     want, off, sign = SKYSEA_BOX_SITES[a]
     assert w == want, hex(w)  # ldr qN, [x23, #off]
     rt = w & 31
-    return ('{ extern float rt_skysea_margin(void); float b[4]; '
+    return ('{ extern float rt_skysea_margin(void); extern void fp_skysea_box(uint64_t, int, float *); float b[4]; '
             f'memcpy(b, (const void *)(uintptr_t)(c->x[23] + {off:#x}), 16); b[0] += {sign}f * rt_skysea_margin(); '
+            f'fp_skysea_box(c->x[23], {1 if sign > 0 else 0}, b); '
             f'memcpy(&c->v[{rt}], b, 16); }}  /* {a:#x}: ldr q{rt}, [x23, #{off:#x}] (sky / sea piece box) */')
 
 
@@ -293,6 +390,57 @@ def _items_page(gen, a):
 PATCHES[ITEMS_PAGE_SITE] = _items_page
 
 
+# Touch controls (runtime/ui/mobile/touch_controls.mm): main+0xee6f80 is the pause menu's update, once per frame on
+# every page and between them (the Items / Map / System pages' own updates are called from it; found by profiling
+# the System and Map pages against play). Its prologue reports that the pause menu is up.
+PAUSE_MENU_SITE = A.PAUSE_MENU_SITE
+
+
+def _pause_menu(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xd10383ff, hex(w)  # sub sp, sp, #0xe0
+    return ('{ extern void rt_pause_menu_tick(void); rt_pause_menu_tick(); c->sp -= 0xe0; }'
+            f'  /* {a:#x}: sub sp, sp, #0xe0 (pause menu shown) */')
+
+
+PATCHES[PAUSE_MENU_SITE] = _pause_menu
+
+
+# The Items page's cursor move: main+0xeb7fdc loads the cell the pressed direction leads to (the page's neighbour
+# table; 0x27 none). A tap on a cell (touch screens) asks for that cell there, so one press moves the cursor straight to
+# it through the game's own move (the old cell let go, the new one picked, its sound): rt_items_nav_pick.
+ITEMS_NAV_SITE = A.ITEMS_NAV_SITE
+
+
+def _items_nav(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xb9400116, hex(w)  # ldr w22, [x8]
+    return ('{ extern uint32_t rt_items_nav_pick(uint32_t); c->x[22] = rt_items_nav_pick(LD32(c->x[8])); }'
+            f'  /* {a:#x}: ldr w22, [x8] (items page: the next cell) */')
+
+
+PATCHES[ITEMS_NAV_SITE] = _items_nav
+
+
+# The file select's cursor (main+0xe61040, each frame while it is shown): a list helper (main+0xe6b160) moves the cursor
+# byte (+0x159b0, the one before it at +0x159b1) up or down among the four files and says whether it moved; on a move
+# the game lets the old file go, picks the new one and plays its sound. A tap on a file (touch screens) puts the cursor
+# there right after the helper, so one press goes straight to it: rt_file_nav_pick.
+FILE_SELECT_NAV_SITE = A.FILE_SELECT_NAV_SITE
+
+
+def _file_select_nav(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x370003c0, hex(w)  # tbnz w0, #0, <moved>
+    t = a + ((w >> 5) & 0x3FFF) * 4
+    return (f'{{ extern int rt_file_nav_pick(uint64_t cursor, int moved); '
+            f'if (rt_file_nav_pick(c->x[19], (int)(c->x[0] & 1))) goto L_{t:x}; }}'
+            f'  /* {a:#x}: tbnz w0, #0 (file select: the cursor moved) */')
+
+
+PATCHES[FILE_SELECT_NAV_SITE] = _file_select_nav
+
+
 # Check tracker (runtime/ui/tracker_overlay.mm): main+0xe93800 runs once per frame only while the pause menu's
 # Map page is shown (fnprof diff of Map vs Items/System/closed). Its prologue reports that.
 MAP_PAGE_SITE = A.MAP_PAGE_SITE
@@ -306,6 +454,21 @@ def _map_page(gen, a):
 
 
 PATCHES[MAP_PAGE_SITE] = _map_page
+
+
+# HUD hearts refresh (runtime/hle/hud_hearts.c): main+0xeaa800 is the HUD's normal state update (x0 = the HUD). Its
+# prologue reruns the HUD's own set-up when a menu changed Link's hearts.
+HUD_HEARTS_SITE = A.HUD_HEARTS_SITE
+
+
+def _hud_hearts(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xd102c3ff, hex(w)  # sub sp, sp, #0xb0
+    return ('{ extern void rt_hud_hearts_tick(Cpu *); rt_hud_hearts_tick(c); c->sp -= 0xb0; }'
+            f'  /* {a:#x}: sub sp, sp, #0xb0 (HUD update: hearts refresh) */')
+
+
+PATCHES[HUD_HEARTS_SITE] = _hud_hearts
 
 
 # ... and its epilogue (the page's layout was updated this frame): the check tracker hides the game's own cursor and
@@ -475,6 +638,53 @@ def _bottle1_use(gen, a):
 PATCHES[BOTTLE1_USE_SITE] = _bottle1_use
 
 
+# D-pad items (runtime/hle/dpad_items.c): the d-pad as a third set of item buttons, in the game's own "use it now?"
+# checks. The 12 Items page items each have one (main+0xd50e60 .. 0xd52fb0; Roc's Feather the last): the buttons newly
+# pressed (`bic w8, w8, w9`), then `tbnz w8, #3` (Y) -> `ldrb wN, [x8, #0xa2]` (the item on Y) `cmp wN, #<its slot>`,
+# and the same for X with #2 / +0xa3. The Y test also passes for a newly pressed d-pad direction, and the read then
+# answers the item itself when a direction just pressed holds it - else the item on Y (Y pressed) or none. A direction
+# and Y (or X) pressed together use both items, as Y and X do (bomb arrows); the button slots never change.
+EQUIP_Y_TEST_SITES = (
+    A.EQUIP_Y_TEST_SITES_0, A.EQUIP_Y_TEST_SITES_1, A.EQUIP_Y_TEST_SITES_2, A.EQUIP_Y_TEST_SITES_3,
+    A.EQUIP_Y_TEST_SITES_4, A.EQUIP_Y_TEST_SITES_5, A.EQUIP_Y_TEST_SITES_6, A.EQUIP_Y_TEST_SITES_7,
+    A.EQUIP_Y_TEST_SITES_8, A.EQUIP_Y_TEST_SITES_9, A.EQUIP_Y_TEST_SITES_10, A.EQUIP_Y_TEST_SITES_11,
+)
+EQUIP_Y_READ_SITES = (
+    A.EQUIP_Y_READ_SITES_0, A.EQUIP_Y_READ_SITES_1, A.EQUIP_Y_READ_SITES_2, A.EQUIP_Y_READ_SITES_3,
+    A.EQUIP_Y_READ_SITES_4, A.EQUIP_Y_READ_SITES_5, A.EQUIP_Y_READ_SITES_6, A.EQUIP_Y_READ_SITES_7,
+    A.EQUIP_Y_READ_SITES_8, A.EQUIP_Y_READ_SITES_9, A.EQUIP_Y_READ_SITES_10, A.EQUIP_Y_READ_SITES_11,
+)
+
+
+def _equip_y_test(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w & 0xFFF8001F == 0x37180008, hex(w)  # tbnz w8, #3, <read>
+    t = a + ((((w >> 5) & 0x3FFF) ^ 0x2000) - 0x2000) * 4
+    return (f'{{ extern int rt_equip_y_test(uint32_t pressed); if (rt_equip_y_test((uint32_t)c->x[8])) goto L_{t:x}; }}'
+            f'  /* {a:#x}: tbnz w8, #3 (Y newly pressed, or a d-pad direction) */')
+
+
+EQUIP_Y_READ_SLOTS = (0xf, 0xe, 0xd, 0x6, 0x5, 0x4, 0x3, 0x2, 0x7, 0xc, 0x8, 0x9)  # (each check's item, its `cmp`)
+
+
+def _equip_y_read(gen, a):
+    at = a - gen.base
+    w = struct.unpack_from('<I', gen.nso.image, at)[0]
+    assert w & 0xFFFFFFE0 == 0x39428900 and w & 31 < 30, hex(w)  # ldrb wN, [x8, #0xa2]
+    slot = EQUIP_Y_READ_SLOTS[EQUIP_Y_READ_SITES.index(a)]
+    if at + 8 <= len(gen.nso.image):
+        n = struct.unpack_from('<I', gen.nso.image, at + 4)[0]
+        assert n == 0x7100001F | slot << 10 | (w & 31) << 5, hex(n)  # cmp wN, #<slot>
+    return (f'{{ extern uint32_t rt_equip_y_read(uint64_t ps, int slot); c->x[{w & 31}] = rt_equip_y_read(c->x[8], {slot}); }}'
+            f'  /* {a:#x}: ldrb w{w & 31}, [x8, #0xa2] (item on Y; item {slot:#x} on a d-pad direction) */')
+
+
+for _a in EQUIP_Y_TEST_SITES:
+    PATCHES[_a] = _equip_y_test
+for _a in EQUIP_Y_READ_SITES:
+    PATCHES[_a] = _equip_y_read
+
+
 # Boss souls (runtime/hle/souls.c): the actor factory f_70008f5ea0 (x2 = spawn info, type u16 at +8) takes the type's
 # create function from the actor table (main+0x1bcc898, 0x58 bytes per type, +0 create fn, +0x50 name); a null fn is
 # its "no such actor" path (the caller gets an empty handle). A dungeon boss whose soul isn't found yet gets that path.
@@ -516,6 +726,22 @@ def _hookshot_attr(gen, a):
 PATCHES[HOOKSHOT_ATTR_SITE] = _hookshot_attr
 
 
+# Hookshot 8-way aim (runtime/hle/hookshot.c, setting hookshot_8way): Link's hookshot action, on entering its Start state
+# (main+0xdbb760), computes his flat forward vector and stores it here (q0) as the direction it gives the hook
+# (main+0xd82a80, its only caller). The runtime can round q0 to the nearest of 8 directions first.
+HOOKSHOT_DIR_SITE = A.HOOKSHOT_DIR_SITE
+
+
+def _hookshot_dir(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x3d80be60, hex(w)  # str q0, [x19, #0x2f0]
+    return ('{ extern void rt_hookshot_dir(Cpu *); rt_hookshot_dir(c); memcpy((void *)(uintptr_t)(c->x[19] + 0x2f0), &c->v[0], 16); }'
+            f'  /* {a:#x}: str q0, [x19, #0x2f0] (hookshot firing direction) */')
+
+
+PATCHES[HOOKSHOT_DIR_SITE] = _hookshot_dir
+
+
 # 360-degree movement (runtime/hle/qol.c, setting move_360): main+0xded9f0 snaps Link's stick vector (s1 = x, s2 = y)
 # to one of 8 directions and returns it as a 32-bit angle (full turn = 2^32, 0 = down). With the setting on, the
 # runtime returns the stick's own angle instead (as the community "360 Controls" mod does).
@@ -554,6 +780,23 @@ def _walk_speed(gen, a):
 
 for _a in WALK_SPEED_SITES:
     PATCHES[_a] = _walk_speed
+
+
+# Wind push (runtime/nvn/weather.c rt_wind_push: a blizzard's wind, for a randomizer option; off by default): Link's
+# move (main+0xd57260, every state's) has just summed the frame's displacement - knockback, walking, a pit's pull, a
+# platform's carry - at [x29-0x80] (world units, this frame; x19 = Link, s1 = the frame's dt) and hands it to the
+# collision move next, so a push added there is stopped by walls and ledges like his walking.
+WIND_PUSH_SITE = A.WIND_PUSH_SITE
+
+
+def _wind_push(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x38686a68, hex(w)  # ldrb w8, [x19, x8]
+    return ('{ extern void rt_wind_push(Cpu *); rt_wind_push(c); c->x[8] = LD8(c->x[19] + c->x[8]); }'
+            f'  /* {a:#x}: ldrb w8, [x19, x8] (Link move: the wind push) */')
+
+
+PATCHES[WIND_PUSH_SITE] = _wind_push
 
 
 # Walk animation rate: main+0xdce320 (walk state) has the walk animation's play rate in s8 (1, 0.75 on slow ground,
@@ -758,10 +1001,10 @@ PROMPT_POS_SITE = A.PROMPT_POS_SITE
 def _prompt_pos(gen, a):
     w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
     assert w == 0x2d060102, hex(w)  # stp s2, s0, [x8, #0x30]
-    return ('{ extern float rt_prompt_x(uint64_t pane, float x); float px_, py_; memcpy(&px_, &c->v[2], 4); '
-            'memcpy(&py_, &c->v[0], 4); px_ = rt_prompt_x(c->x[8], px_); '
+    return ('{ extern void rt_prompt_xy(uint64_t pane, float *x, float *y); float px_, py_; memcpy(&px_, &c->v[2], 4); '
+            'memcpy(&py_, &c->v[0], 4); rt_prompt_xy(c->x[8], &px_, &py_); '
             'memcpy((void *)(uintptr_t)(c->x[8] + 0x30), &px_, 4); memcpy((void *)(uintptr_t)(c->x[8] + 0x34), &py_, 4); }'
-            f'  /* {a:#x}: stp s2, s0, [x8, #0x30] (action prompt spot: mirror mode) */')
+            f'  /* {a:#x}: stp s2, s0, [x8, #0x30] (action prompt spot: mirror mode, first-person view) */')
 
 
 PATCHES[PROMPT_POS_SITE] = _prompt_pos
@@ -908,12 +1151,33 @@ SHAPE_SIM_SITES = [A.SHAPE_SIM_SITES_0, A.SHAPE_SIM_SITES_1]
 # so the effect plays where the item is.
 EFFECT_BONE_SITE = A.EFFECT_BONE_SITE
 
+# Text speed (issue #681, runtime/hle/text_speed.c). A message pane's text shows by playing a layout animation: its
+# frame is how much of the text is drawn. Each window opening (main+0xf53c80) sets the pane's step to 2 (pane+0x284;
+# times pane+0x280, frames per character unit). The pane's update (main+0xf534e0, every message layout's) plays the
+# animation at that step while its frame is short of the page's end and sets the frame to the end once it is there.
+# B mid-page sets the frame to the end too (main+0xf53b60). Fast scales the step; Instant takes the "at the end"
+# branch at once. The window's states (Reading, KeyWaiting, Selecting, TimerWaiting) still wait for the button or
+# timer as before.
+TEXT_RATE_SITE = A.TEXT_RATE_SITE  # str w8, [x0, #0x284]
+TEXT_SNAP_SITE = A.TEXT_SNAP_SITE  # b.lt: the frame is short of the page's end
+
 # ---- hook sites: the instruction stays as it is; just before it the runtime's rt_hook (runtime/hle/hooks.c) is asked
 # what to do - 0 run it, 1 the hook did it all, 2.. jump to the site's first.. target (each a label in its function).
 # The game code they generate never changes when a hook's behaviour does: only a new site needs the game code
 # rebuilt. New game-code changes go here, as a hook, unless they can't.
 # site -> (the instruction word, (jump targets...), what it's for)
+# Power-up music (powerup_music.c): the pickup starts BGM_NUTS directly. Four music paths independently check
+# Link's sound-disable bit at +0x1b8c; set it only in their local copies so normal music isn't muted or replaced.
+BUFF_MUSIC_PICKUP_SITE = A.BUFF_MUSIC_PICKUP_SITE
+BUFF_MUSIC_FLAGS_SITES = [A.BUFF_MUSIC_FLAGS_SITES_0, A.BUFF_MUSIC_FLAGS_SITES_1,
+                        A.BUFF_MUSIC_FLAGS_SITES_2, A.BUFF_MUSIC_FLAGS_SITES_3]
+
 HOOKS = {
+    BUFF_MUSIC_PICKUP_SITE: (0x97ccd77b, (), 'bl main+0xaf560: Guardian Acorn / Piece of Power music'),
+    BUFF_MUSIC_FLAGS_SITES[0]: (0xb95b8d15, (), 'ldr w21, [x8, #0x1b8c]: music update, power-up sound flag'),
+    BUFF_MUSIC_FLAGS_SITES[1]: (0xb95b8d14, (), 'ldr w20, [x8, #0x1b8c]: zone music, power-up sound flag'),
+    BUFF_MUSIC_FLAGS_SITES[2]: (0xb95b8d15, (), 'ldr w21, [x8, #0x1b8c]: event music, power-up sound flag'),
+    BUFF_MUSIC_FLAGS_SITES[3]: (0xb95b8d15, (), 'ldr w21, [x8, #0x1b8c]: power-up presentation, sound flag'),
     MB_SEEN_SITE: (0xf94002a8, (), 'ldr x8, [x21]: an actor seen - field mini-bosses (miniboss.c)'),
     CRASHOUT_SITE: (0xb900b81f, (A.CRASHOUT_SKIP,), 'str wzr, [x0, #0xb8]: Blaino knock-out, no crash-out on the Field'),
     GOHMA_HEADING_SITES[0]: (0xb915ee68, (), 'str w8, [x19, #0x15ec]: Gohma heading at Link on the Field'),
@@ -939,4 +1203,6 @@ HOOKS = {
     SHAPE_SIM_SITES[0]: (0xaa0003f4, (A.SHAPE_SIM_SKIP_0,), 'mov x20, x0: a PhysX shape change, no update without its simulation object (#314)'),
     SHAPE_SIM_SITES[1]: (0xaa0003e1, (A.SHAPE_SIM_SKIP_1,), 'mov x1, x0: a PhysX shape change, no update without its simulation object (#314)'),
     EFFECT_BONE_SITE: (0xf9402ac0, (A.EFFECT_BONE_SKIP,), 'ldr x0, [x22, #0x50]: a bone-following effect without its bone, at the actor instead (#349)'),
+    TEXT_RATE_SITE: (0xb9028408, (), 'str w8, [x0, #0x284]: a message pane\'s text step, set as a window opens (#681)'),
+    TEXT_SNAP_SITE: (0x540002cb, (), 'b.lt: message text short of the page\'s end, Instant shows it all (#681)'),
 }

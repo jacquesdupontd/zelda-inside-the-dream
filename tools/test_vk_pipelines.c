@@ -74,11 +74,15 @@ static void init_device(void) {
     VkPhysicalDeviceVulkan11Features f11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, .pNext = &f12,
                                             .storageBuffer16BitAccess = VK_TRUE};
     VkPhysicalDeviceFeatures2 f = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &f11, .features = have.features};
+#ifdef TEST_VK_PIPELINES_MINIMAL_DEVICE
+    f.pNext = NULL;  // arithmetic probes need only the supported core features
+#endif
     f.features.robustBufferAccess = VK_FALSE;
     float prio = 1;
     VkDeviceQueueCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueCount = 1, .pQueuePriorities = &prio};
     VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qi};
-    if (vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev) != VK_SUCCESS) { fprintf(stderr, "vkCreateDevice failed\n"); exit(1); }
+    VkResult created = vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev);
+    if (created != VK_SUCCESS) { fprintf(stderr, "vkCreateDevice failed: %d\n", created); exit(1); }
 }
 
 static const VkDynamicState DYN[] = {
@@ -234,6 +238,7 @@ out:
     maxwell_free(ci);
 }
 
+#ifndef TEST_VK_PIPELINES_NO_MAIN
 int main(int argc, char **argv) {
     if (argc < 4) { fprintf(stderr, "usage: %s <translate.c> <count> <seed>\n", argv[0]); return 2; }
     load_patterns(argv[1]);
@@ -252,3 +257,4 @@ int main(int argc, char **argv) {
            n_skip, n_fail, g_messages);
     return n_fail != 0;
 }
+#endif

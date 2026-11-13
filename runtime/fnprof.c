@@ -33,9 +33,9 @@ static void bt_check(uint64_t a, uint64_t lr, uint64_t x0) {
     for (int i = 0; i < bt_n; i++)
         if (bt_addrs[i] == a && !atomic_exchange(&bt_done[i], 1)) {
             if (i == 0) g_bt_first_x0 = x0;
-            uint64_t vt = x0 >= 0x7000000000ull && x0 < 0x7800000000ull ? *(uint64_t *)(uintptr_t)x0 : 0;
-            uint64_t v100 = vt >= 0x7000000000ull && vt < 0x7800000000ull ? *(uint64_t *)(uintptr_t)(vt + 0x100) : 0;
-            uint64_t p8 = x0 >= 0x7000000000ull && x0 < 0x7800000000ull ? *(uint64_t *)(uintptr_t)(x0 + 8) : 0;
+            uint64_t vt = x0 >= GUEST_LO && x0 < GUEST_HI ? *(uint64_t *)(uintptr_t)x0 : 0;
+            uint64_t v100 = vt >= GUEST_LO && vt < GUEST_HI ? *(uint64_t *)(uintptr_t)(vt + 0x100) : 0;
+            uint64_t p8 = x0 >= GUEST_LO && x0 < GUEST_HI ? *(uint64_t *)(uintptr_t)(x0 + 8) : 0;
             fprintf(stderr, "[fnprof-bt] %llx entered from guest lr %llx x0 %llx (vtable %llx, +0x100 %llx, [x0+8] %llx):\n",
                     (unsigned long long)a, (unsigned long long)lr, (unsigned long long)x0, (unsigned long long)vt,
                     (unsigned long long)v100, (unsigned long long)p8);
@@ -43,8 +43,55 @@ static void bt_check(uint64_t a, uint64_t lr, uint64_t x0) {
         }
 }
 
+// LARECOMP_FNPROF_OBJS=<hex addr>: the distinct objects (x0) that function is entered with inside the window, their
+// first 0x600 bytes written to build/fnprof_objs.txt at frame LARECOMP_FNPROF_DUMP_AT (default: the window's end) -
+// research: which field of an object the game sets differently (cells loaded vs drawn, 20/10)
+static uint64_t objs_fn = ~0ull, objs[256];
+static _Atomic int nobjs;
+static void objs_note(uint64_t a, uint64_t x0) {
+    if (objs_fn == ~0ull) { const char *e = getenv("LARECOMP_FNPROF_OBJS"); objs_fn = e ? strtoull(e, NULL, 16) : 0; }
+    if (a != objs_fn || !objs_fn) return;
+    int n = atomic_load(&nobjs);
+    for (int i = 0; i < n; i++) if (objs[i] == x0) return;
+    if (n < 256) objs[n] = x0, atomic_store(&nobjs, n + 1);
+}
+static void objs_dump(void) {
+    FILE *f = fopen("build/fnprof_objs.txt", "w");
+    for (int i = 0; f && i < nobjs; i++) {
+        const uint32_t *w = (const uint32_t *)(uintptr_t)objs[i];
+        fprintf(f, "obj %llx", (unsigned long long)objs[i]);
+        for (int j = 0; j < 0x600 / 4; j++) fprintf(f, " %08x", w[j]);
+        fprintf(f, "\n");
+    }
+    if (f) fclose(f);
+    LOG("[fnprof] %d objects written to build/fnprof_objs.txt\n", (int)nobjs);
+}
+
+// LARECOMP_FNPROF_X0=<hex addr>,<hex size>: every guest function entered with x0 inside that range (an object),
+// logged once per function with its caller and the offset - which code computes or reads an object's fields
+// (research: the render camera's frustum planes, 20/10)
+static void x0_note(uint64_t a, uint64_t lr, uint64_t x0) {
+    static uint64_t lo = 1, size;
+    static uint64_t seen[512];
+    static _Atomic int nseen;
+    if (lo == 1) {
+        lo = 0;
+        const char *e = getenv("LARECOMP_FNPROF_X0");
+        if (e) { char *p; lo = strtoull(e, &p, 16); if (*p == ',') size = strtoull(p + 1, NULL, 16); }
+    }
+    if (!lo || x0 < lo || x0 >= lo + size) return;
+    int n = atomic_load(&nseen);
+    for (int i = 0; i < n; i++) if (seen[i] == a) return;
+    if (n >= 512) return;
+    seen[n] = a, atomic_store(&nseen, n + 1);
+    fprintf(stderr, "[fnprof-x0] f_%llx from lr %llx with x0 = object+%#llx\n", (unsigned long long)a, (unsigned long long)lr,
+            (unsigned long long)(x0 - lo));
+}
+
 void fnprof_hit(uint64_t a, uint64_t lr, uint64_t x0) {
+    x0_note(a, lr, x0);
     if (bt_n) bt_check(a, lr, x0);
+    objs_note(a, x0);
     uint32_t h = (uint32_t)((a >> 2) * 0x9E3779B1u) & (NSLOT - 1);
     for (int n = 0; n < NSLOT; n++, h = (h + 1) & (NSLOT - 1)) {
         uint64_t cur = atomic_load_explicit(&slots[h].addr, memory_order_relaxed);
@@ -61,6 +108,9 @@ static int cmp(const void *x, const void *y) {
 }
 
 void fnprof_frame(uint64_t frame) {
+    static long dump_at = -2;
+    if (dump_at == -2) dump_at = getenv("LARECOMP_FNPROF_DUMP_AT") ? atol(getenv("LARECOMP_FNPROF_DUMP_AT")) : -1;
+    if (dump_at > 0 && (long)frame == dump_at) objs_dump();
     static long from = -2, to;
     if (from == -2) {
         from = -1;
@@ -82,6 +132,7 @@ void fnprof_frame(uint64_t frame) {
     if (f) fclose(f);
     free(rows);
     LOG("[fnprof] %d functions, written %s (frames %ld-%ld)\n", n, out, from, to);
+    if (dump_at <= 0 && nobjs) objs_dump();
     from = -1;
 }
 

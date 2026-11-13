@@ -1,7 +1,9 @@
 # your own game files and what's made from them (building from source puts them here)
 input/
 extracted/
+/extracted
 generated/
+/generated
 generated-*/
 /rando/
 # Nintendo fonts (users import their own; only the README ships)
@@ -15,6 +17,7 @@ save/
 /gamecontrollerdb.txt
 # tools and Python environments (machine-specific)
 tools/venv/
+/tools/venv
 venv/
 __pycache__/
 .DS_Store

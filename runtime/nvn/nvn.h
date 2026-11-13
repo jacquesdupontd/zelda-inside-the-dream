@@ -96,6 +96,7 @@ typedef struct NvnWindow {
 typedef struct NvnSync {
     volatile int signaled;
     volatile uint64_t seq;  // GPU submission this fence belongs to (renderer_fence_seq), 0 = none
+    volatile uint64_t ticket;  // asynchronous submission: the queue's place of a queue fence (objects.c), 0 = none
 } NvnSync;
 
 // ---- command recording (stored in guest command memory)

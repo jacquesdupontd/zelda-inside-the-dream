@@ -42,6 +42,7 @@
 //   pipeline objects    (WAIT_PIPES) R reads Pipe.state / .pipe through the resolver: _Atomic state, the handle
 //                       written by the build worker before the state's release store
 #include "record.h"
+#include "vk_xr.h"  // (vk_queue_lock)
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -199,6 +200,12 @@ void rec_init(bool prof_on) {
     // #358) and ran fine with it off; LARECOMP_VK_RECORDER=1 still turns it on there
     bool mali = g_vk.props.vendorID == 0x13B5;
     if (mali && !e) want = 0;
+    // Inside The Dream: on, as Beta 6 ships it (12/11/2026, evening). The first-person view's passes on the render
+    // thread (exec.c: the sky, the scene and depth snapshots, what he holds, the 3D image; device.c: the presenter's
+    // slot) go through the rec_* calls like the rest; the presenter at the display's rate, the video recorder and the
+    // headset's copies record their own command buffers on their own threads, and get a frame only once the recorder
+    // submitted it (device.c vk_frame_end, the timeline waits). Measured on his route: the render thread at 15 ms a frame
+    // in the wide views held the game in its 30 fps mode. LARECOMP_VK_RECORDER=0: off.
     on = 0;
     if (want) {
         const char *mb = getenv("LARECOMP_VK_RECORDER_MB");
@@ -534,13 +541,24 @@ void rec_UpdateDescriptorSets(uint32_t n, const VkWriteDescriptorSet *w) {
 
 // ================================================================== command buffers, submissions, presents
 static void begin_cb_run(const void *p) {
+    VkCommandBuffer cb = *(const VkCommandBuffer *)p;
+    // (g_vk.cb_release, device.c: Arm's driver keeps vkCmdBeginRendering's memory across the implicit reset below)
+    if (g_vk.cb_release) VK_CHECK(vkResetCommandBuffer(cb, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT));
     VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
-    VK_CHECK(vkBeginCommandBuffer(*(const VkCommandBuffer *)p, &bi));
+    VK_CHECK(vkBeginCommandBuffer(cb, &bi));
 }
 void rec_BeginCommandBuffer(VkCommandBuffer cb) {
     if (on <= 0) { begin_cb_run(&cb); return; }
     ENQ_T0();
     *(VkCommandBuffer *)push(begin_cb_run, sizeof cb, 0) = cb;
+    commit();
+    ENQ_END();
+}
+static void reset_cb_run(const void *p) { VK_CHECK(vkResetCommandBuffer(*(const VkCommandBuffer *)p, 0)); }
+void rec_ResetCommandBuffer(VkCommandBuffer cb) {
+    if (on <= 0) { reset_cb_run(&cb); return; }
+    ENQ_T0();
+    *(VkCommandBuffer *)push(reset_cb_run, sizeof cb, 0) = cb;
     commit();
     ENQ_END();
 }
@@ -566,7 +584,9 @@ static void submit_run(const void *p) {
                         .waitSemaphoreInfoCount = a->nwait, .pWaitSemaphoreInfos = &a->wait};
     uint64_t t0 = NOW();
     rq_watch("vkQueueSubmit2", a->seq);  // (a hang dump names it)
+    vk_queue_lock();  // (Inside The Dream: the PC VR frames and the first-person view's own passes use the same queue)
     VkResult r = vkQueueSubmit2(g_vk.queue, 1, &si, VK_NULL_HANDLE);
+    vk_queue_unlock();
     rq_watch(NULL, 0);
     uint64_t dt = NOW() - t0;
     if (prof) ADD(r_submit_ns, dt);
@@ -603,7 +623,9 @@ static void present_run(const void *p) {
                            .swapchainCount = 1, .pSwapchains = &a->swapchain, .pImageIndices = &a->image};
     uint64_t t0 = NOW();
     rq_watch("vkQueuePresentKHR", a->image);
+    vk_queue_lock();
     VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
+    vk_queue_unlock();
     rq_watch(NULL, 0);
     uint64_t dt = NOW() - t0;
     __atomic_fetch_add(&g_vk_frame_waits[2], dt, __ATOMIC_RELAXED);
@@ -612,8 +634,14 @@ static void present_run(const void *p) {
         if (n++ < 20) LOG("[vk] vkQueuePresentKHR took %llu ms\n", (unsigned long long)(dt / 1000000));
     }
     __atomic_fetch_add(&g_vk_frame_waits[3], 1, __ATOMIC_RELAXED);
+#ifdef __ANDROID__
+    // (SUBOPTIMAL every frame there: the swapchain is left unrotated on purpose, device.c create_swapchain)
+    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR)
+        atomic_store_explicit(&present_recreate, 1, memory_order_release);
+#else
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) atomic_store_explicit(&present_recreate, 1, memory_order_release);
-    else if (r != VK_SUCCESS) {
+#endif
+    else if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
         static int n;
         if (n++ < 10) LOG("[vk] present failed: %d\n", r);
         if (r == VK_ERROR_DEVICE_LOST) { vk_device_fault_report(); FATAL("vkQueuePresentKHR: device lost\n"); }

@@ -10,10 +10,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <time.h>
 
 #include "../hle.h"
 #include "../rando.h"
 #include "../settings.h"
+#include "hookshot_snap.h"
 
 #define HOOK_TARGET 0x4000u
 
@@ -73,11 +76,58 @@ uint32_t rt_hookshot_attr(Cpu *c, uint32_t attr) {
     return attr;
 }
 
+// x19: Link's hookshot action, about to store its firing direction (q0 = x, y, z, flat). With 360-degree movement Link
+// can face a few degrees off a straight line, which sends the hook past the target he is lined up with (#647).
+void rt_hookshot_dir(Cpu *c) {
+    const char *e = ENV("LARECOMP_HOOKSHOT_8WAY");  // test: 1 / 0 forces it
+    if (!(e ? atoi(e) != 0 : g_settings.hookshot_8way)) return;
+    float d[3];
+    memcpy(d, &c->v[0], sizeof d);
+    float x = d[0], z = d[2];
+    hookshot_snap_8way(&d[0], &d[2]);
+    memcpy(&c->v[0], d, sizeof d);
+    // Link turns to match: his rotation is a pure yaw (x y z w) held twice in his transform component, read and written
+    // like his position (+0x80 / +0xb0 in doorjump.c). Only then: anything else is not the on-foot pose this assumes.
+    uint64_t player = LD64(c->x[19] + 0x210), pc = player ? LD64(player + 0x80) : 0;
+    if (pc) {
+        float *r0 = (float *)(uintptr_t)(pc + 0x90), *r1 = (float *)(uintptr_t)(pc + 0xc0);
+        if (fabsf(r1[0]) < 1e-3f && fabsf(r1[2]) < 1e-3f) {
+            hookshot_yaw_quat(d[0], d[2], &r1[1], &r1[3]);
+            r0[1] = r1[1], r0[3] = r1[3];
+        }
+    }
+    if (ENV("LARECOMP_HOOKSHOT_LOG")) LOG("[hookshot] dir (%.3f, %.3f) -> (%.3f, %.3f)\n", x, z, d[0], d[2]);
+}
+
 // ---- test hook: LARECOMP_HOOKSHOT_TOUR=<step>;<step>...  step = <Level>:<Locator>:<x>:<z>:<script>
 // Warps to Level/Locator, waits for the level, puts Link at x, z, then runs <script> (relative frames):
 // "<t>:<L|R|U|D|A|B|X|Y>:<frames>" input, "<t>:S:0" window shot (build/tour_<SHOT_ID>_<step>_<t>.png),
 // "<t>:E:0" end of the step. Link's position is logged every 10 frames ([tour]). (The shots come out upside down.)
 char g_window_shot_request[256];
+bool g_window_shot_player;  // (the request is the player's: written in the background, a notice on screen)
+
+// F12 or the controller's Capture button (runtime/ui/menu.mm): the window image as the player sees it, game and
+// overlay, into LARECOMP_SHOT_DIR (default ~/Pictures/LASRecomp), one PNG per press, named by the time.
+void window_shot_key(void) {
+    if (g_window_shot_request[0]) return;  // (one already waits for the next frame)
+    char dir[200];
+    const char *d = getenv("LARECOMP_SHOT_DIR"), *home = getenv("HOME");
+    if (d && *d) snprintf(dir, sizeof dir, "%s", d);
+    else snprintf(dir, sizeof dir, "%s/Pictures/LASRecomp", home ? home : ".");
+    char sub[200];
+    for (char *q = dir; (q = strchr(q + 1, '/'));) { snprintf(sub, sizeof sub, "%.*s", (int)(q - dir), dir); mkdir(sub, 0755); }
+    mkdir(dir, 0755);
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm tm;
+    localtime_r(&ts.tv_sec, &tm);
+    char name[256];
+    snprintf(name, sizeof name, "%s/shot-%04d-%02d-%02d-%02d%02d%02d-%03ld.png", dir, tm.tm_year + 1900, tm.tm_mon + 1,
+             tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec / 1000000);
+    g_window_shot_player = true;
+    snprintf(g_window_shot_request, sizeof g_window_shot_request, "%s", name);
+    LOG("[shot] %s\n", name);
+}
 
 void hookshot_tour_tick(uint64_t frame) {
     static char *steps[64];
