@@ -91,6 +91,9 @@ typedef struct {
     int fp_behind_up;    // first-person, view from behind: how high above his eyes, hundredths (70; 80 % of it indoors)
     bool fp_behind;      // first-person: the camera behind Link and a little above, Link seen (F5 / L3 switch it)
     int fp_world;        // first-person in a headset: the world's size, percent (100: a person's; less: smaller, further)
+    int fp_xr_text_height;  // first-person in a headset: the game's text panel, its centre's degrees from eye level (0)
+    int fp_xr_text_size;    // its width, percent of 60 degrees (100)
+    bool fp_xr_text_follow; // it follows the head when it turns away (true), or stays where the player recentred
     int rec_quality;     // the recorder (runtime/record.h): 0 ProRes 422 HQ, 1 HEVC by the GPU, 2 H.264 by the GPU
     int rec_size;        // its size: 0 the window's, 1 1080p, 2 1440p, 3 4K (from the window's central 16:9)
     float vr_scale;      // a headset: each eye's image, a share of the size it recommends (0: the shell's default; read by

@@ -91,8 +91,14 @@ GA_ADDR(DELEGATE_JOB_VTABLE_BASE,         0x7001c51358)
 // The game's ray against what is solid (the hookshot's: main+0xd7ecc0 casts it each frame of its flight; x0 its result,
 // x1 a filter, x2 / x3 from / to as float4, w4 what it stops at), the objects it is given, and the hookshot's mask
 // (Inside The Dream: the first-person camera kept out of walls; not found in 1.0.1 yet: 0, unused)
-GA_ADDR(RAY_CAST,                         0)
-GA_ADDR(RAY_RESULT_VT,                    0)
-GA_ADDR(RAY_RESULT_HIT_VT,                0)
-GA_ADDR(RAY_FILTER_VT,                    0)
-GA_ADDR(RAY_HOOKSHOT_MASK,                0)
+GA_ADDR(RAY_CAST,                         0x0)
+GA_ADDR(RAY_RESULT_VT,                    0x0)
+GA_ADDR(RAY_RESULT_HIT_VT,                0x0)
+GA_ADDR(RAY_FILTER_VT,                    0x0)
+GA_ADDR(RAY_HOOKSHOT_MASK,                0x0)
+
+// Inside The Dream: as runtime_v1_0_0.h, 1.0.0's moved as their neighbours in patches_v1_0_1.h (the same code below
+// 0x7000ded9f0, 0xd0 further from 0x7000e443fc), not checked on this version's files: a wrong one only means the
+// runtime doesn't recognise that caller (the far cells stay unloaded; the game's own out-of-memory path is kept)
+GA_ADDR(FP_FAR_ASKER,                     0x700085c51c)
+GA_ADDR(CMDBUF_OOM_DISPATCH,              0x700113e790)

@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "nvn.h"
+#include "../game_addresses.h"
 
 #define JUMP_RESERVE (sizeof(CmdRec) + 8)
 
@@ -70,7 +71,7 @@ static uint8_t *_Atomic g_ov;
 static _Atomic uint32_t g_ov_next;
 static bool no_handler(const NvnCmdBuf *cb) {
     if (!cb->callback) return true;
-    if (cb->callback == 0x700113e6c0ull && cb->callback_data)  // (the game's dispatcher; event 0's handler)
+    if (cb->callback == GA(CMDBUF_OOM_DISPATCH) && cb->callback_data)  // (the game's dispatcher; event 0's handler)
         return *(const uint64_t *)(uintptr_t)(cb->callback_data + 0xd0) == 0;
     return false;
 }

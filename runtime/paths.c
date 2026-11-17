@@ -546,6 +546,26 @@ static unsigned long long free_space(const char *dir) {
 #endif
 }
 
+unsigned long long rt_free_space(const char *dir) {
+    const char *t = getenv("LARECOMP_TEST_FREE_GB");  // (test) the room the setup sees, in GB: its space check's card
+    if (t && *t) return (unsigned long long)(atof(t) * 1e9);
+    return free_space(dir);
+}
+
+// The disk a folder is on, as Windows names it ("C:"); false elsewhere (a folder there is named by its path)
+bool rt_disk_name(const char *dir, char *out, size_t n) {
+#ifdef _WIN32
+    char v[MAX_PATH];
+    if (!GetVolumePathNameA(dir, v, sizeof v)) return false;
+    size_t l = strlen(v);
+    if (l > 2 && (v[l - 1] == '\\' || v[l - 1] == '/')) v[l - 1] = 0;  // (C:\ -> C:)
+    return (size_t)snprintf(out, n, "%s", v) < n;
+#else
+    (void)dir, (void)out, (void)n;
+    return false;
+#endif
+}
+
 static unsigned long long entries_size(const char *dir) {
     unsigned long long n = 0;
     for (size_t i = 0; i < N_ENTRIES; i++) {

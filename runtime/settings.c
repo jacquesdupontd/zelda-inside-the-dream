@@ -84,7 +84,7 @@ Settings g_settings = {
     .upscaler = UPSCALE_BILINEAR,
     .antialias = AA_SMAA,  // immersive foliage and silhouettes need coverage smoothing
 #endif
-    .fp_fov = 60, .fp_eye = 110, .fp_eye_back = 0, .fp_behind_dist = 240, .fp_behind_up = 70, .fp_sens = 5, .fp_hands = true, .fp_horizon = true, .fp_world = 100, .rec_quality = 1, .rec_size = 2,
+    .fp_fov = 60, .fp_eye = 110, .fp_eye_back = 0, .fp_behind_dist = 240, .fp_behind_up = 70, .fp_sens = 5, .fp_hands = true, .fp_horizon = true, .fp_world = 100, .fp_xr_text_height = 0, .fp_xr_text_size = 100, .fp_xr_text_follow = true, .rec_quality = 1, .rec_size = 2,
 #ifndef __ANDROID__
     .upscaler_auto = true,  // (the Quest: the choices above, not the GPU's defaults)
     .shadow_quality = SHADOW_DEFAULT,
@@ -350,6 +350,9 @@ void settings_load(void) {
         else if (!strcmp(key, "fp_hands")) g_settings.fp_hands = atoi(val) != 0;
         else if (!strcmp(key, "fp_horizon")) g_settings.fp_horizon = atoi(val) != 0;
         else if (!strcmp(key, "fp_world")) { int v = atoi(val); g_settings.fp_world = v < 50 ? 50 : v > 200 ? 200 : v; }
+        else if (!strcmp(key, "fp_xr_text_height")) { int v = atoi(val); g_settings.fp_xr_text_height = v < -30 ? -30 : v > 30 ? 30 : v; }
+        else if (!strcmp(key, "fp_xr_text_size")) { int v = atoi(val); g_settings.fp_xr_text_size = v < 50 ? 50 : v > 150 ? 150 : v; }
+        else if (!strcmp(key, "fp_xr_text_follow")) g_settings.fp_xr_text_follow = atoi(val) != 0;
         else if (!strcmp(key, "rec_quality")) { int v = atoi(val); g_settings.rec_quality = v < 0 || v > 2 ? 0 : v; }
         else if (!strcmp(key, "rec_size")) { int v = atoi(val); g_settings.rec_size = v < 0 || v > 3 ? 2 : v; }
         else if (!strcmp(key, "vr_scale")) { float v = (float)atof(val); g_settings.vr_scale = v <= 0 ? 0 : v < 0.4f ? 0.4f : v > 2 ? 2 : v; }
@@ -516,6 +519,9 @@ void settings_save(void) {
             g_settings.fp_eye, g_settings.fp_sens, g_settings.fp_invert_y, g_settings.fp_hands, g_settings.fp_horizon,
             g_settings.fp_behind, g_settings.fp_eye_back, g_settings.fp_behind_dist, g_settings.fp_behind_up);
     fprintf(f, "fp_world = %d\n", g_settings.fp_world);
+    fprintf(f, "fp_xr_text_height = %d\n", g_settings.fp_xr_text_height);
+    fprintf(f, "fp_xr_text_size = %d\n", g_settings.fp_xr_text_size);
+    fprintf(f, "fp_xr_text_follow = %d\n", g_settings.fp_xr_text_follow ? 1 : 0);
     fprintf(f, "vr_scale = %.2f\n", g_settings.vr_scale);
     fprintf(f, "rec_quality = %d\n", g_settings.rec_quality);
     fprintf(f, "rec_size = %d\n", g_settings.rec_size);

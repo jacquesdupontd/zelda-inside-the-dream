@@ -31,6 +31,11 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *opts, char *why, s
 bool gamebuild_killed(void);
 // After a failed gamebuild_run: Windows security settings (Control Flow Guard) stopped the generator (#337).
 bool gamebuild_cfg_stopped(void);
+// After a failed gamebuild_run: one line for the player under the reason (which helper and its last log line, or how it
+// ended - « generator (main): AssertionError: 0x... »; "" when nothing more is known), and everything known about it
+// for a report (which helper, its command, how it ended - Windows' own code and what it means -, the end of its log)
+const char *gamebuild_failure_detail(void);
+const char *gamebuild_failure_details(void);
 // The generator and the compiler are there (shipped builds; a source checkout with tools/venv and clang).
 bool gamebuild_available(void);
 // The iOS build's tools: the bundled zig, and in the kit (a .laskit file, tools/ios_kit.sh, never a folder) the app,

@@ -157,6 +157,14 @@ extern "C" void difficulty_draw(float scale) {
         ch |= opt_int("  World size (headset)", &g_settings.fp_world, 50, 200, 5, 100, "%d %%",
                       "In a headset, how big the island looks around you. Lower makes everything smaller and further "
                       "away, as if you stood taller; higher, bigger and closer.");
+        ch |= opt_int("  Text height (headset)", &g_settings.fp_xr_text_height, -30, 30, 1, 0, "%d degrees",
+                      "In a headset, where the game's text, hearts and buttons sit: a panel in front of you, its middle this "
+                      "many degrees above eye level (below when negative). The dialogue box is in its lower part.");
+        ch |= opt_int("  Text size (headset)", &g_settings.fp_xr_text_size, 50, 150, 5, 100, "%d %%",
+                      "In a headset, how wide that panel is: 100 is 60 degrees, about a large screen seen from a sofa.");
+        ch |= opt_toggle("  Text follows the head (headset)", &g_settings.fp_xr_text_follow, true,
+                         "In a headset, the panel comes back in front of you once you turn your head away. Off: it stays "
+                         "where you last recentred the headset.");
         ch |= opt_toggle("  Distant mountains", &g_settings.fp_horizon, true,
                          "The Tal Tal range and the Wind Fish's egg on the horizon, past what the game draws.");
         ch |= opt_toggle("  View from behind", &g_settings.fp_behind, false,

@@ -254,6 +254,12 @@ RT_OBJ   := $(patsubst runtime/%.cpp,$(B)/rt/%.o,$(patsubst runtime/%.c,$(B)/rt/
 PATHMAP  := -ffile-prefix-map=$(CURDIR)=. $(if $(filter windows,$(PLATFORM)),-ffile-prefix-map=$(shell cygpath -m '$(CURDIR)')=.)
 RTFLAGS  := -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn $(EXPORTFLAG) $(DEPINC) $(OSFLAGS) $(PATHMAP)
 CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn $(EXPORTFLAG) $(DEPINC) $(PATHMAP) $(DYNFLAG)
+# No C asserts in what we build: the runtime has none of its own, but the third-party code compiled into it has (VMA,
+# miniz; ImGui's IM_ASSERT is off in third_party/imgui/imconfig.h) - a failed check stopped a player's app during the
+# setup, a box on Windows and an abort elsewhere (Inside The Dream, Discord #36). ASSERTS=1: all of them back, ImGui's too.
+ASSERTFLAG := $(if $(ASSERTS),-DLARECOMP_IMGUI_ASSERTS,-DNDEBUG)
+RTFLAGS  += $(ASSERTFLAG)
+CXXFLAGS += $(ASSERTFLAG)
 
 all: $(EXE) $(if $(GEN_SRC),$(GAMELIB))
 

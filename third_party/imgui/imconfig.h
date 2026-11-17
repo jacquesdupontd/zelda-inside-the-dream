@@ -18,6 +18,12 @@
 // If your macro uses multiple statements, make sure is enclosed in a 'do { .. } while (0)' block so it can be used as a single statement.
 //#define IM_ASSERT(_EXPR)  MyAssert(_EXPR)
 //#define IM_ASSERT(_EXPR)  ((void)(_EXPR))     // Disable asserts
+// LAS Recomp / Inside The Dream: an ImGui check never stops a player's app (Discord #36, 14/11/2026: « Assertion failed!
+// imgui_widgets.cpp 797, size_arg.x != 0.0f » - a box on Windows, an abort elsewhere, during the game's setup). Developers
+// get them back with -DLARECOMP_IMGUI_ASSERTS.
+#ifndef LARECOMP_IMGUI_ASSERTS
+#define IM_ASSERT(_EXPR) ((void)(_EXPR))
+#endif
 
 //---- Define attributes of all API symbols declarations, e.g. for DLL under Windows
 // Using Dear ImGui via a shared library is not recommended, because of function call overhead and because we don't guarantee backward nor forward ABI compatibility.

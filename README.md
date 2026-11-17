@@ -47,9 +47,9 @@ Everything is on **[port0r.com](https://port0r.com)**.
 
 | Platform | File | How you play |
 | --- | --- | --- |
-| Windows 10 / 11 | [`InsideTheDream-v0.1.0-windows-setup.exe`](https://github.com/jacquesdupontd/zelda-inside-the-dream/releases/download/v0.1.0/InsideTheDream-v0.1.0-windows-setup.exe) (the one-click installer), or [`InsideTheDream-v0.1.0-windows.zip`](https://github.com/jacquesdupontd/zelda-inside-the-dream/releases/download/v0.1.0/InsideTheDream-v0.1.0-windows.zip) | In VR through SteamVR, or on the screen |
-| Linux (x86-64) | [`InsideTheDream-v0.1.0-linux-x86_64.AppImage`](https://github.com/jacquesdupontd/zelda-inside-the-dream/releases/download/v0.1.0/InsideTheDream-v0.1.0-linux-x86_64.AppImage) | On the screen |
-| Mac (Apple Silicon) | [`InsideTheDream-v0.1.0-macos.dmg`](https://github.com/jacquesdupontd/zelda-inside-the-dream/releases/download/v0.1.0/InsideTheDream-v0.1.0-macos.dmg) | On the screen |
+| Windows 10 / 11 | [`InsideTheDream-v0.1.1-windows-setup.exe`](https://github.com/jacquesdupontd/zelda-inside-the-dream/releases/download/v0.1.1/InsideTheDream-v0.1.1-windows-setup.exe) (the one-click installer), or [`InsideTheDream-v0.1.1-windows.zip`](https://github.com/jacquesdupontd/zelda-inside-the-dream/releases/download/v0.1.1/InsideTheDream-v0.1.1-windows.zip) | In VR through SteamVR, or on the screen |
+| Linux (x86-64) | [`InsideTheDream-v0.1.1-linux-x86_64.AppImage`](https://github.com/jacquesdupontd/zelda-inside-the-dream/releases/download/v0.1.1/InsideTheDream-v0.1.1-linux-x86_64.AppImage) | On the screen |
+| Mac (Apple Silicon) | [`InsideTheDream-v0.1.1-macos.dmg`](https://github.com/jacquesdupontd/zelda-inside-the-dream/releases/download/v0.1.1/InsideTheDream-v0.1.1-macos.dmg) | On the screen |
 
 The checksums are in `SHA256SUMS.txt` next to the files.
 
@@ -87,21 +87,22 @@ Wherever you play, keep about 12 GB free on your disk for the first launch.
 ## Install
 
 **Windows.**
-- Download `InsideTheDream-v0.1.0-windows-setup.exe` and open it. It installs in one click, without administrator rights,
+- Download `InsideTheDream-v0.1.1-windows-setup.exe` and open it. It asks where to install, then installs without administrator rights,
   puts an Inside The Dream shortcut on your desktop, and opens the app.
-- If you'd rather not use an installer, `InsideTheDream-v0.1.0-windows.zip` holds exactly the same app. Unzip it wherever you
+  The game's data goes in that folder and takes about 9 GB, so pick a disk with enough room.
+- If you'd rather not use an installer, `InsideTheDream-v0.1.1-windows.zip` holds exactly the same app. Unzip it wherever you
   like, and open `lasrecomp.exe` in the Inside The Dream folder.
 - Windows may say it protected your PC, because the app isn't signed with a paid certificate. Click More info, then Run
   anyway.
 
 **Linux.**
-- Download `InsideTheDream-v0.1.0-linux-x86_64.AppImage` and make it executable, either in its Properties (Permissions) or
+- Download `InsideTheDream-v0.1.1-linux-x86_64.AppImage` and make it executable, either in its Properties (Permissions) or
   with `chmod +x` in a terminal. Then open it.
 - If it doesn't start, your system may be missing FUSE. Run it with `APPIMAGE_EXTRACT_AND_RUN=1` in front of the command,
   and it will start without it.
 
 **Mac.**
-- Download `InsideTheDream-v0.1.0-macos.dmg`, open it, and drag Inside The Dream into Applications.
+- Download `InsideTheDream-v0.1.1-macos.dmg`, open it, and drag Inside The Dream into Applications.
 - The first time you open it, macOS will probably refuse, because the app doesn't come from the App Store. Open System
   Settings, go to Privacy & Security, scroll down, and click Open Anyway.
 
@@ -115,8 +116,14 @@ The app copies what it needs from your files, then rebuilds the game's code for 
 and it takes a few minutes: about seven on a recent desktop PC, a bit more on a laptop. Your own files are never changed.
 When it's done, the start screen lets you play.
 
+If the setup fails, the page tells you why. The app also writes everything it knows to a file called `setup-report.txt`,
+and the **SHOW THE REPORT** button opens the folder that holds it. Send us that file on
+[the Port0r Discord](https://discord.gg/XMk7GgapuN), and we will help you.
+
 To play in VR, turn your headset on and start SteamVR first. Then click **PLAY IN VR** on the start screen. That is
-Windows only.
+Windows only. In the headset, the game's text, hearts and buttons sit on a panel at eye level in front of you. The panel
+stays put while you look around, and it comes back in front of you when you turn your head away. You can change its
+height and size, or stop it from following your head, in **Settings > Gameplay**.
 
 ## The three views
 

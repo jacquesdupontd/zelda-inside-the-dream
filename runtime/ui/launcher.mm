@@ -17,11 +17,13 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <limits.h>
+#include <math.h>
 #include <pthread.h>
 #include <set>
 #include <string>
 #include <unordered_map>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 #include <vector>
 #include <algorithm>
@@ -506,6 +508,127 @@ static void set_failure(int k, int have = -1, const char *reason = NULL) {
     g_fail_kind = k;
 }
 
+// The setup report: a setup that fails (copying the game files, building the game code) writes all it knows next to the
+// saves, setup-report.txt, and its message says why and where that file is, for the player to send it; a setup that
+// finishes removes it. A failure said only « make sure there's about 2 GB free » to a player who had plenty, while its
+// reason - an assertion in the generator, on another game version - was in the log only (Discord #36, 17/11/2026).
+static const char *itd_version(void);  // (with the start screen's name, below)
+static std::string g_report;           // its path, once written (the failure card's button)
+static std::string g_src_used;         // the folder the player chose, for the report (g_src is cleared once copied)
+static std::string setup_report_path(void) {
+#ifdef _WIN32
+    return std::string(rt_data_root()) + "\\setup-report.txt";
+#else
+    return std::string(rt_data_root()) + "/setup-report.txt";
+#endif
+}
+static void report_path_line(FILE *f, const char *label, const std::string &p) {
+    bool space = p.find(' ') != std::string::npos, wide = false;
+    for (unsigned char c : p) wide |= c >= 0x80;
+    fprintf(f, "%s: %s\n    (%zu characters%s%s%s", label, p.c_str(), p.size(), space ? ", spaces" : "",
+            wide ? ", non-ASCII characters" : "", p.size() > 200 ? ", LONG - Windows paths stop at 260" : "");
+    if (const char *c = p.empty() ? NULL : plat_cloud_synced(p.c_str())) fprintf(f, ", synced by %s", c);
+    fprintf(f, ")\n");
+}
+static void write_setup_report(const char *head, const std::string &why, const std::string &detail, const char *details,
+                               const std::string &src) {
+    std::string path = setup_report_path();
+    FILE *f = fopen(path.c_str(), "wb");
+    if (!f) { fprintf(stderr, "[launcher] couldn't write the setup report %s\n", path.c_str()); return; }
+    time_t now = time(NULL);
+    char when[64] = "";
+    if (struct tm *t = gmtime(&now)) strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S UTC", t);
+    fprintf(f, "Inside The Dream %s (on LAS Recomp %s) - setup report, %s\n\n", itd_version(), larecomp_version(), when);
+    fprintf(f, "What failed: %s\nWhy: %s\n", head, why.c_str());
+    if (!detail.empty()) fprintf(f, "Detail: %s\n", detail.c_str());
+    PlatSysInfo si = {};
+    plat_system_info(&si);
+    fprintf(f, "\nSystem: %s, %s, %d threads, %.1f GB RAM%s%s\n", si.os[0] ? si.os : "unknown OS", si.cpu[0] ? si.cpu : "unknown CPU",
+            si.threads, si.ram / 1073741824.0, si.package ? ", " : "", si.package ? si.package : "");
+    char exe[1100];
+    if (plat_exe_path(exe, sizeof exe)) report_path_line(f, "Program", exe);
+    report_path_line(f, "Data folder", rt_data_root());
+    fprintf(f, "    %.1f GB free on its disk\n", rt_free_space(rt_data_root()) / 1e9);
+    if (!src.empty()) report_path_line(f, "Game files chosen", src);
+    bool abs_root = !g_root.empty() && (g_root[0] == '/' || g_root[0] == '\\' || (g_root.size() > 1 && g_root[1] == ':'));
+    report_path_line(f, "Game files (the app's copy)", abs_root ? g_root : std::string(rt_data_root()) + "/" + g_root);
+    char label[32];
+    const char *v = game_release_label((g_root + "/exefs").c_str(), label, sizeof label);
+    fprintf(f, "Game version: %s\n", v ? v : "unknown (no exefs/main there yet, or not a version this app knows)");
+    fprintf(f, "\n---- what happened\n%s", details && *details ? details : "(nothing more was recorded)\n");
+    fprintf(f, "\n---- the app's own log: lasrecomp.log, in the data folder above\n");
+    bool ok = fclose(f) == 0;
+    fprintf(stderr, "[launcher] setup report%s: %s\n", ok ? "" : " (incomplete)", path.c_str());
+    pthread_mutex_lock(&g_lock);
+    g_report = path;
+    pthread_mutex_unlock(&g_lock);
+}
+static void remove_setup_report(void) {
+    remove(setup_report_path().c_str());
+    pthread_mutex_lock(&g_lock);
+    g_report.clear();
+    pthread_mutex_unlock(&g_lock);
+}
+static std::string itd_tr(const std::string &en);  // (below)
+static const char *itd_t(const char *en, const char *fr);
+
+// Room for the setup, on the data folder's disk: the game files' copy (the romfs, about 6 GB) and the game code's build
+// (generated sources, objects, the compiler's cache and the library, under 3 GB at its peak). On Windows the data
+// folder is the app's own, which the installer puts on C: (%LOCALAPPDATA%): a C: nearly full failed the setup with
+// « make sure there's about 2 GB free » while the player had plenty of room elsewhere (Discord #36, 17/11/2026).
+static const double BUILD_SPACE = 3e9;
+static const char *const SPACE_WHY = LN("there isn't enough free space for the setup");
+// What is short and where: the disk by its name on Windows, the folder, the room free and the room needed
+static std::string space_sentence(double free_b, double need_b) {
+    char disk[64], b[2400];
+    const char *dir = rt_data_root();
+    double fg = free_b / 1e9, ng = round(need_b / 1e9);
+    if (rt_disk_name(dir, disk, sizeof disk))
+        snprintf(b, sizeof b, itd_t("There's only %.1f GB free on %s, where the game data goes (%s). The setup needs about %.0f GB "
+                                    "there. Free some space on %s, or install Inside The Dream on another disk.",
+                                    "Il ne reste que %.1f Go libres sur %s, o\xc3\xb9 vont les donn\xc3\xa9" "es du jeu (%s). La pr\xc3\xa9paration "
+                                    "a besoin d'environ %.0f Go \xc3\xa0 cet endroit. Lib\xc3\xa9rez de la place sur %s, ou installez "
+                                    "Inside The Dream sur un autre disque."),
+                 fg, disk, dir, ng, disk);
+    else
+        snprintf(b, sizeof b, itd_t("There's only %.1f GB free where the game data goes (%s). The setup needs about %.0f GB there. "
+                                    "Free some space on that disk and try again.",
+                                    "Il ne reste que %.1f Go libres l\xc3\xa0 o\xc3\xb9 vont les donn\xc3\xa9" "es du jeu (%s). La "
+                                    "pr\xc3\xa9paration a besoin d'environ %.0f Go \xc3\xa0 cet endroit. Lib\xc3\xa9rez de la place "
+                                    "sur ce disque, puis r\xc3\xa9" "essayez."),
+                 fg, dir, ng);
+    return b;
+}
+
+// The failure k with its real reason: why (one of the setup's own sentences, shown in the menus' language), detail
+// (what the system or the helper said, as it said it), the report written; where space is short (under need, or the
+// usual for k), what is short and where.
+static void set_failure_explained(int k, const std::string &why, const std::string &detail, const char *details,
+                                  double need = 0) {
+    pthread_mutex_lock(&g_lock);
+    std::string src = g_src.empty() ? g_src_used : g_src;
+    pthread_mutex_unlock(&g_lock);
+    set_failure(k);  // (the headline and the usual hint)
+    pthread_mutex_lock(&g_lock);
+    std::string head = g_job;
+    pthread_mutex_unlock(&g_lock);
+    write_setup_report(head.c_str(), why, detail, details, src);
+    std::string r = itd_tr(why);
+    if (!r.empty() && r[0] >= 'a' && r[0] <= 'z') r[0] = (char)(r[0] - 'a' + 'A');
+    if (!r.empty() && r.back() != '.') r += ".";
+    if (!detail.empty()) r += "\n" + detail;
+    if (need <= 0) need = k == FAIL_COPY ? 6e9 + BUILD_SPACE : BUILD_SPACE;
+    double free_b = (double)rt_free_space(rt_data_root());
+    if (free_b > 0 && free_b < need) {  // (the space check's own failure: its sentence says it all, on a card of few lines)
+        if (detail.empty() && why == SPACE_WHY) r.clear();
+        r += (r.empty() ? "" : "\n") + space_sentence(free_b, need);
+    }
+    pthread_mutex_lock(&g_lock);
+    if (!g_report.empty()) r += "\n" + itd_tr("Everything we know about it is in the file setup-report.txt: send it to us on our Discord.");
+    g_job_hint = r;
+    pthread_mutex_unlock(&g_lock);
+}
+
 // exefs: the folder with main and main.npdm; romfs: the folder with region_common (runtime/romfs_build.h: the
 // picked folder or a few levels below it)
 static void find_game(const std::string &dir, std::string &exefs, std::string &romfs, bool &unusable) {
@@ -601,9 +724,35 @@ static bool build_game_code(void) {
     if (!ok) {
         fprintf(stderr, "[launcher] game code: %s\n", why);
         if (g_cancel_build) set_job(LN("Build cancelled. The finished parts are kept, so you can resume later."));
-        else set_failure(FAIL_BUILD, -1, gamebuild_killed() ? why : NULL);
+        else set_failure_explained(FAIL_BUILD, why, gamebuild_failure_detail(), gamebuild_failure_details());
     }
     return ok;
+}
+
+// Room for what comes next (need bytes on the data folder's disk), measured before starting: when short, the setup
+// doesn't start, and says what is short and where (a disk filled partway failed later, with a vaguer reason)
+static bool enough_space(double need, int k) {
+    double free_b = (double)rt_free_space(rt_data_root());
+    fprintf(stderr, "[launcher] space: %.1f GB free in %s, %.1f GB needed\n", free_b / 1e9, rt_data_root(), need / 1e9);
+    if (free_b <= 0 || free_b >= need || getenv("LARECOMP_SPACE_IGNORE")) return true;
+    char d[1600];
+    snprintf(d, sizeof d, "free space in %s: %.2f GB, the setup needs about %.1f GB\n", rt_data_root(), free_b / 1e9, need / 1e9);
+    set_failure_explained(k, SPACE_WHY, "", d, need);
+    return false;
+}
+
+// The setup page's line on room: on Windows, the disk it goes to (the app's folder, which the installer puts on C:)
+static std::string setup_space_line(void) {
+    static std::string root, disk;
+    if (root != rt_data_root()) {
+        char d[64];
+        root = rt_data_root(), disk = rt_disk_name(root.c_str(), d, sizeof d) ? d : "";
+    }
+    if (disk.empty()) return itd_t("About 9 GB free, and a few minutes the first time.", "Environ 9 Go libres, et quelques minutes la premi\xc3\xa8re fois.");
+    char b[400];
+    snprintf(b, sizeof b, itd_t("About 9 GB free on %s, and a few minutes the first time.",
+                                "Environ 9 Go libres sur %s, et quelques minutes la premi\xc3\xa8re fois."), disk.c_str());
+    return b;
 }
 
 static void *extract_thread(void *) {
@@ -611,6 +760,7 @@ static void *extract_thread(void *) {
     std::string src;
     pthread_mutex_lock(&g_lock);
     src = g_src;
+    if (!src.empty()) g_src_used = src;
     pthread_mutex_unlock(&g_lock);
     g_cancel_build = false;
     g_done = 0, g_total = 0, g_phase_base = 0, g_build_frac = -1, g_copy_skipped = false;
@@ -619,7 +769,7 @@ static void *extract_thread(void *) {
     bool unusable = false;  // (game packages rather than its files)
     if (src.empty() && check_copied_files(g_root).empty()) {  // copied already (an update needs new game code)
         g_copy_skipped = true;
-        if (!build_game_code()) goto done;
+        if (!enough_space(BUILD_SPACE, FAIL_BUILD) || !build_game_code()) goto done;
         goto check;
     }
 #ifdef __ANDROID__
@@ -674,10 +824,12 @@ static void *extract_thread(void *) {
         mkdir(g_root.c_str(), 0755);
         unsigned long long rbytes = romfs_dir_bytes(romfs.c_str());
         g_total = rbytes;
+        if (!enough_space((double)rbytes + BUILD_SPACE, FAIL_COPY)) goto done;
         set_job(LN("Copying the game files..."));
         if (!romfs_copy_tree(exefs.c_str(), (g_root + "/exefs").c_str(), NULL) ||
             !romfs_copy_tree(romfs.c_str(), (g_root + "/romfs").c_str(), setup_progress)) {
-            set_failure(FAIL_COPY);
+            std::string d = std::string("copying ") + exefs + " and " + romfs + " to " + g_root + ":\n  " + romfs_copy_error() + "\n";
+            set_failure_explained(FAIL_COPY, LN("the game files couldn't be copied"), romfs_copy_error(), d.c_str());
             goto done;
         }
         g_phase_base = rbytes, g_done = rbytes;
@@ -692,6 +844,7 @@ check:
         game_files_changed();
         std::string why = check_game_files(g_root);
         if (why.empty()) prepare_shaders();  // (the GPU device is up: the start screen draws with it)
+        if (why.empty()) remove_setup_report();  // (an earlier failure's)
         if (why.empty() && files_changed(g_root)) set_job(CHANGED_HEAD, true, CHANGED_HINT);  // (playable all the same)
         else if (why.empty()) set_job(LN("Game files ready."));
 #if PLAT_IOS
@@ -2069,7 +2222,8 @@ static void load_fonts(void) {
 // kicker and the footer, with its link. Shipped next to the executable (rt_resource): the Anton and Barlow fonts (OFL,
 // third_party/fonts) and the light wordmark (docs/branding/port0r-wordmark-light.bmp, SDL reads BMP).
 #define ITD_NAME "Inside The Dream"
-#define ITD_VERSION "0.1.0"
+#define ITD_VERSION "0.1.1"
+static const char *itd_version(void) { return ITD_VERSION; }
 #define ITD_SITE "https://port0r.com/"
 #define ITD_DISCORD "https://discord.gg/XMk7GgapuN"
 #define ITD_UPSTREAM "https://github.com/peiikai/LASRecomp"
@@ -2167,6 +2321,11 @@ static std::string itd_tr(const std::string &en) {
         {"Inside The Dream needs version 1.0.0 of the game, without updates.", "Inside The Dream a besoin de la version 1.0.0 du jeu, sans mise \xc3\xa0 jour."},
         {"Some of the game's files are missing - usually a copy or unzip that stopped partway. Copy the game files again so none are missing, then choose the folder again.",
          "Il manque des fichiers du jeu, souvent \xc3\xa0 cause d'une copie ou d'une d\xc3\xa9" "compression interrompue. Recopiez les fichiers du jeu en entier, puis choisissez \xc3\xa0 nouveau le dossier."},
+        {"Everything we know about it is in the file setup-report.txt: send it to us on our Discord.",
+         "Tout ce que nous savons de l'erreur est dans le fichier setup-report.txt : envoyez-le-nous sur notre Discord."},
+        {"the game files couldn't be copied", "les fichiers du jeu n'ont pas pu \xc3\xaatre copi\xc3\xa9s"},
+        {"SHOW THE REPORT", "MONTRER LE RAPPORT"},
+        {"there isn't enough free space for the setup", "il n'y a pas assez de place libre pour la pr\xc3\xa9paration"},
         {"Make sure there's about 2 GB free and try again. If it keeps happening, tell us on our Discord.",
          "V\xc3\xa9rifiez qu'il reste environ 2 Go libres, puis r\xc3\xa9" "essayez. Si cela recommence, dites-le-nous sur notre Discord."},
         {"Some of the game's files are missing, usually from a copy or unzip that stopped partway. Copy your game files again, then choose that folder and set them up again.",
@@ -2373,7 +2532,7 @@ static bool itd_pill(const char *id, ImVec2 pos, ImVec2 size, int kind, int icon
 
 static void draw_busy_overlay(ImVec2 ds, const std::string &job, bool test_busy, bool prep_wait) {
     // (Inside The Dream, 28/10: port0r.com's look - a card of the night, no outline, the yellow bar, pill buttons)
-    float sc = ds.y / 1080.0f, s = ds.y / 720.0f;
+    float sc = fmaxf(ds.y, 360.0f) / 1080.0f, s = fmaxf(ds.y, 360.0f) / 720.0f;  // (a minimized window: 0 x 0, Discord #36)
     ImDrawList *fg = ImGui::GetForegroundDrawList();
     ImVec2 o = ImGui::GetMainViewport()->Pos;
     if (!g_auto_update) fg->AddRectFilled(o, ImVec2(o.x + ds.x, o.y + ds.y), IM_COL32(6, 8, 14, 175));  // (an update: plain)
@@ -3132,7 +3291,9 @@ extern "C" void launcher_run(const char *root) {
             const Page frame_page = page;  // (menu_sfx_frame: B on the main page does nothing)
 
             ImVec2 ds = io.DisplaySize;
-            float s = ds.y / 720.0f;  // layout scale (fonts are built for ~2x)
+            // layout scale (fonts are built for ~2x). A minimized window reports 0 x 0: the scale, and every button's size
+            // with it, went to 0 - ImGui's « size_arg.x != 0.0f » during a setup left running in the taskbar (Discord #36)
+            float s = fmaxf(ds.y, 360.0f) / 720.0f;
             bool pieces = false;  // (this frame has plastic pieces: Settings, the game files window, the keyboard)
             ImGui::GetIO().FontGlobalScale = s * 0.5f;
             ImDrawList *bg = ImGui::GetBackgroundDrawList();
@@ -3584,7 +3745,7 @@ extern "C" void launcher_run(const char *root) {
                                 itd_t("Copies the game files, then recompiles the game code.", "Copie les fichiers du jeu, puis recompile le code du jeu."),
                                 NULL, cw - 44 * s);
                     dl->AddText(g_itd_label, 13 * s, ImVec2(x2 + 22 * s, cy + 88 * s), ITD_WHITE(140),
-                                itd_t("About 7 GB free, and a few minutes the first time.", "Environ 7 Go libres, et quelques minutes la premi\xc3\xa8re fois."),
+                                setup_space_line().c_str(),
                                 NULL, cw - 44 * s);
                     if (itd_pill("setup_go", ImVec2(x2 + 22 * s, cy + ch - 22 * s - 52 * s), ImVec2(cw - 44 * s, 52 * s), PILL_ACCENT, ICON_PLAY,
                                  resume ? itd_t("RESUME THE GAME CODE", "REPRENDRE LE CODE DU JEU") : itd_t("SET UP THE GAME", "PR\xc3\x89PARER LE JEU"),
@@ -3602,17 +3763,33 @@ extern "C" void launcher_run(const char *root) {
                     std::string what, todo;
                     if (failed && !job.empty()) what = itd_tr(job), todo = itd_tr(job_hint);
                     else if (!busy && !status.empty() && status != "No game files yet" && job.empty()) what = itd_tr(status), todo = itd_tr(status_hint(status));
+                    pthread_mutex_lock(&g_lock);
+                    std::string report = failed ? g_report : std::string();  // (setup-report.txt: its button)
+                    pthread_mutex_unlock(&g_lock);
+#ifdef __ANDROID__
+                    report.clear();  // (no folder to show)
+#endif
                     if (!what.empty()) {
                         float ey = cy + ch + 18 * s, ew = 2 * cw + cg;
-                        float th = g_itd_label->CalcTextSizeA(14 * s, FLT_MAX, ew - 64 * s, todo.c_str()).y;
-                        ImVec2 a(X, ey), b(X + ew, ey + 62 * s + th);
+                        // (the report's button at the top right, the texts beside it: the card no taller - under it, the
+                        //  footer; a button below the texts ran into it)
+                        const float rbw = report.empty() ? 0 : 230 * s, tw = ew - 80 * s - (rbw ? rbw + 16 * s : 0);
+                        float th = g_itd_label->CalcTextSizeA(14 * s, FLT_MAX, tw, todo.c_str()).y;
+                        ImVec2 a(X, ey), b(X + ew, ey + fmaxf(62 * s + th, rbw ? 68 * s : 0));
                         dl->AddRectFilled(a, b, IM_COL32(120, 22, 18, 200), 16 * s);
                         dl->AddCircleFilled(ImVec2(a.x + 30 * s, a.y + 28 * s), 11 * s, IM_COL32(255, 92, 80, 255));
                         dl->AddRectFilled(ImVec2(a.x + 28.6f * s, a.y + 21 * s), ImVec2(a.x + 31.4f * s, a.y + 30 * s), ITD_WHITE(255), 1 * s);
                         dl->AddCircleFilled(ImVec2(a.x + 30 * s, a.y + 34 * s), 1.7f * s, ITD_WHITE(255));
-                        dl->AddText(g_itd_btn, 15 * s, ImVec2(a.x + 52 * s, a.y + 19 * s), ITD_WHITE(255), what.c_str(), NULL, ew - 80 * s);
+                        dl->AddText(g_itd_btn, 15 * s, ImVec2(a.x + 52 * s, a.y + 19 * s), ITD_WHITE(255), what.c_str(), NULL, tw);
                         if (!todo.empty())
-                            dl->AddText(g_itd_label, 14 * s, ImVec2(a.x + 52 * s, a.y + 44 * s), IM_COL32(255, 214, 208, 255), todo.c_str(), NULL, ew - 80 * s);
+                            dl->AddText(g_itd_label, 14 * s, ImVec2(a.x + 52 * s, a.y + 44 * s), IM_COL32(255, 214, 208, 255), todo.c_str(), NULL, tw);
+#ifndef __ANDROID__
+                        // the report's folder, its file in it to send (B / Esc stay the page's Back)
+                        if (rbw && itd_pill("report", ImVec2(b.x - rbw - 16 * s, a.y + 14 * s), ImVec2(rbw, 40 * s), PILL_SOFT,
+                                            ICON_NONE, itd_t("SHOW THE REPORT", "MONTRER LE RAPPORT"), g_itd_btn, 13 * s, 0.08f,
+                                            !busy, s))
+                            reveal_folder(rt_data_root());
+#endif
                     }
                 }
                 // back to the start screen (B / Esc too); it says the game files are needed

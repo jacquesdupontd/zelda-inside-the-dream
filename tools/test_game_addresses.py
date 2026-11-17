@@ -46,7 +46,8 @@ for key in VERSIONS:
     patch_values, runtime_values = load_table(table_path(key)), load_table(table_path(key, 'runtime'))
     assert not patch_values.keys() & runtime_values.keys(), f'{key}: define each address in one header'
     values = patch_values | runtime_values
-    assert len(values) == len(set(values.values())), f'{key}: use the existing name for shared addresses'
+    found = [v for v in values.values() if v]  # (0: not found on that version yet, unused - Inside The Dream's ray)
+    assert len(found) == len(set(found)), f'{key}: use the existing name for shared addresses'
     tables[key] = (patch_values, runtime_values)
     if key != 'v1_0_0':  # same names in the same order (the C struct is laid out from v1_0_0's)
         assert list(patch_values) == list(tables['v1_0_0'][0]), f'patches_{key}.h names differ from v1_0_0'
@@ -77,8 +78,11 @@ fixture = json.loads((ROOT/'tools/tests/patches_v1_0_0.json').read_text())
 assert set(patches.PATCHES) == {int(a, 16) for a in fixture['patches']}
 for address, expected in fixture['patches'].items():
     address = int(address, 16)
-    gen = SimpleNamespace(base=address, nso=SimpleNamespace(image=struct.pack('<I', int(expected['word'], 16))))
+    before = expected.get('before')  # (a patch that also reads the instruction before its own: Inside The Dream's far query)
+    image = (struct.pack('<I', int(before, 16)) if before else b'') + struct.pack('<I', int(expected['word'], 16))
+    gen = SimpleNamespace(base=address - (4 if before else 0), nso=SimpleNamespace(image=image))
     code = patches.PATCHES[address](gen, address)
+    assert code is not None, f'Patch left out at {address:x}'
     assert hashlib.sha256(code.encode()).hexdigest() == expected['sha256'], f'Patch output changed at {address:x}'
 assert hashlib.sha256(json.dumps(patches.HOOKS, sort_keys=True).encode()).hexdigest() == fixture['hooks_sha256']
 assert addr_text('f_@HAS_ITEM@(c);') == f'f_{ADDRESS.HAS_ITEM:x}(c);'

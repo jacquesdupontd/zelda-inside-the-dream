@@ -428,9 +428,12 @@ class Module:
                            f'  /* {a:#x}: hook (runtime/hle/hooks.c) */')
                 last = 'op'
                 continue
-            if a in PATCHES:  # hand-written replacement for one instruction (tools/patches.py)
+            # hand-written replacement for one instruction (tools/patches.py); None: that site is left out (one of
+            # Inside The Dream's first-person sites on a game version it doesn't fit) - the instruction lifted as it is
+            code = PATCHES[a](self, a) if a in PATCHES else None
+            if code is not None:
                 flush()
-                out.append('    ' + rebase_patch(PATCHES[a](self, a)))
+                out.append('    ' + rebase_patch(code))
                 last = 'op'
                 continue
             k = ins.kind

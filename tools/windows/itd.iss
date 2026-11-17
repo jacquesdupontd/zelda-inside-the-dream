@@ -26,9 +26,13 @@ OutputBaseFilename={#OutputName}
 SetupIconFile={#IconFile}
 UninstallDisplayIcon={app}\lasrecomp.exe
 UninstallDisplayName=Inside The Dream
-; one click: every page but the progress bar off; the start screen follows
+; two clicks: the folder (C:'s %LOCALAPPDATA% by default), then the progress bar; the start screen follows. The setup of
+; the game files writes about 9 GB in this folder (the data folder on Windows is the app's own, runtime/paths.c): a C:
+; nearly full failed it while the player had room on another disk (Discord #36, 17/11/2026). The page offers another
+; disk, and ExtraDiskSpaceRequired makes it say the room needed, and warn when that disk has less.
 DisableWelcomePage=yes
-DisableDirPage=yes
+DisableDirPage=no
+ExtraDiskSpaceRequired=9000000000
 DisableProgramGroupPage=yes
 DisableReadyPage=yes
 DisableFinishedPage=yes

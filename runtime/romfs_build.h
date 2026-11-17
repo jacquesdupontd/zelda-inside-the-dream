@@ -39,6 +39,8 @@ void romfs_find_game(const char *dir, char *exefs, size_t exefs_size, char *romf
 bool romfs_copy_tree(const char *src, const char *dst, void (*progress)(uint64_t done, uint64_t total));
 // One file the same way (an existing dst is replaced).
 bool romfs_copy_file(const char *src, const char *dst);
+// After a failed copy: which file or folder, and the system's reason ("" when none was recorded)
+const char *romfs_copy_error(void);
 
 #ifdef __cplusplus
 }

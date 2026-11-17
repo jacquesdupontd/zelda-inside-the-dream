@@ -710,7 +710,7 @@ uint64_t rt_far_query(uint64_t lr, uint64_t query) {
     static uint64_t asker, *box;
     if (!asker) {
         const char *e = ENV("LARECOMP_FP_FAR_ASKER");
-        asker = e ? strtoull(e, NULL, 16) : 0x700085c51cull;
+        asker = e ? strtoull(e, NULL, 16) : GA(FP_FAR_ASKER);
     }
     if (lr != asker || !fp_view_on() || strcmp(game_level_name(), "Field")) return 0;
     if (g_region < 0) g_region = region_start();
@@ -878,9 +878,10 @@ void fp_xr_view(const float *q, const float *pos, const float *tan) {
     memcpy(g_xr.q, q, 16), memcpy(g_xr.pos, p, 12), memcpy(g_xr.tan, tan, 16);
     if (!++g_xr_serial) g_xr_serial = 1;
 }
-void fp_xr_off(void) { g_xr_serial = 0, g_xr_have0 = false; tilt_reset(); }
+static void hud_reset(void);
+void fp_xr_off(void) { g_xr_serial = 0, g_xr_have0 = false; tilt_reset(); hud_reset(); }
 static void xr_head_q(float *q) { memcpy(q, g_xr.q, 16); }
-void fp_xr_recenter(void) { g_xr_have0 = false; tilt_reset(); }  // (the runtime recentred: android/xr_app.c)
+void fp_xr_recenter(void) { g_xr_have0 = false; tilt_reset(); hud_reset(); }  // (the runtime recentred: android/xr_app.c)
 // The head view's field (tangents left, right, up, down), while the view follows the head (the Vulkan backend's
 // foveation: runtime/nvn/vulkan/exec.c vrs_*).
 bool fp_xr_tangents(float *tan) {
@@ -996,6 +997,73 @@ static const XrView *xr_now(uint32_t *serial) {
     }
     *serial = g_xr_serial;
     return g_xr_serial ? &g_xr : NULL;
+}
+
+// ---- the game's text in a headset (Discord #42, 16/11/2026: « The text for all conversations are too low in the
+// headset and move with head movement. Very difficult to read »)
+// In the view from his eyes the game draws its 2D overlay - the dialogue box, the hearts, the buttons, the place names -
+// into the head's own image: a 16:9 band across the whole field (more than 100 degrees on a Quest 3), centred on the
+// image, whose middle looks some 13 degrees down (the field reaches lower than higher), the dialogue box near the band's
+// bottom, about 30 degrees down - and turning with the face. Here the band becomes a panel in the room:
+// fp_xr_text_size percent of 60 degrees wide, its centre fp_xr_text_height degrees from eye level, ahead of the head's
+// heading - which it follows lazily (fp_xr_text_follow: once the head has turned 15 degrees away, it eases back in
+// front), or ahead of where the player last recentred. The head looks about inside it; nothing moves when the eyes do.
+// fp_xr_hud_place gives, for the image being drawn, where the band's centre goes and how wide the band is, as
+// fractions of the image (top-down as it is seen); runtime/nvn/vulkan/exec.c moves the overlay's draws there.
+// LARECOMP_XR_TEXT=0: the overlay as the game draws it (before 0.1.1).
+static float g_hud_yaw;          // (the panel's heading, the room's radians: 0 ahead of the recentred seat)
+static bool g_hud_have, g_hud_turning;
+static uint32_t g_hud_serial;
+static int64_t g_hud_ns;
+static void hud_reset(void) { g_hud_have = false; }
+bool fp_xr_hud_place(float *cx, float *cy, float *width) {
+    static int on = -1;
+    if (on < 0) { const char *e = ENV("LARECOMP_XR_TEXT"); on = !e || atoi(e) != 0; }
+    uint32_t xs;
+    const XrView *x = on ? xr_now(&xs) : NULL;
+    if (!x) { g_hud_have = false; return false; }
+    float m[9];
+    quat_basis(x->q, m);
+    const float *t = x->tan;  // (left, right, up, down)
+    if (!(t[1] > t[0]) || !(t[2] > t[3])) return false;
+    if (xs != g_hud_serial) {  // (once per view: the head's heading, and the panel's after it)
+        g_hud_serial = xs;
+        int64_t now = (int64_t)plat_now_ns();
+        float dt = g_hud_have ? fminf(fmaxf((float)(now - g_hud_ns) * 1e-9f, 0), 0.1f) : 0;
+        g_hud_ns = now;
+        float fx = -m[2], fz = -m[8];  // (the head's forward, level)
+        bool level_seen = fx * fx + fz * fz > 1e-4f;  // (straight up or down: no heading, the panel stays)
+        float head = level_seen ? atan2f(fx, -fz) : g_hud_yaw;
+        if (!g_settings.fp_xr_text_follow) g_hud_yaw = 0, g_hud_turning = false;
+        else if (!g_hud_have) g_hud_yaw = head, g_hud_turning = false;
+        else {
+            float d = wrap_pi(head - g_hud_yaw);
+            if (fabsf(d) > 15 * (float)M_PI / 180) g_hud_turning = true;  // (looked away: it comes back in front)
+            if (g_hud_turning) {
+                g_hud_yaw = wrap_pi(g_hud_yaw + d * (1 - expf(-dt / 0.25f)));
+                if (fabsf(d) < 2 * (float)M_PI / 180) g_hud_turning = false;
+            }
+        }
+        g_hud_have = true;
+    }
+    // the panel's centre, a direction in the room, into the head's frame (m: its columns are where the head's axes point)
+    float p = (float)g_settings.fp_xr_text_height * (float)M_PI / 180;
+    float w[3] = {sinf(g_hud_yaw) * cosf(p), sinf(p), -cosf(g_hud_yaw) * cosf(p)};
+    float hx = m[0] * w[0] + m[3] * w[1] + m[6] * w[2], hy = m[1] * w[0] + m[4] * w[1] + m[7] * w[2];
+    float hz = m[2] * w[0] + m[5] * w[1] + m[8] * w[2];
+    if (-hz < 0.2f) {  // (more than 78 degrees off: out of the image)
+        *cx = hx > 0 ? 2.0f : -1.0f, *cy = 0.5f;
+    } else {
+        float tx = hx / -hz, ty = hy / -hz;
+        *cx = (tx - t[0]) / (t[1] - t[0]), *cy = (t[2] - ty) / (t[2] - t[3]);
+    }
+    int sz = g_settings.fp_xr_text_size >= 50 && g_settings.fp_xr_text_size <= 150 ? g_settings.fp_xr_text_size : 100;
+    *width = 2 * tanf(30.0f * (float)sz / 100.0f * (float)M_PI / 180) / (t[1] - t[0]);
+    static int said;
+    if (!said++) LOG("[fp] headset: the game's text on a panel %.0f degrees wide, %d degrees from eye level, %s\n",
+                     60.0f * (float)sz / 100.0f, g_settings.fp_xr_text_height,
+                     g_settings.fp_xr_text_follow ? "following the head" : "where the player recentred");
+    return true;
 }
 
 // The view of an eye: the body's turn (yaw) times the head's orientation, at the eye's place in the world.

@@ -160,6 +160,10 @@ int plat_proc_wait(PlatProc p, bool block);  // exit code, or -1 while still run
 // plat_spawn with Control Flow Guard off for the child (the generator: unicorn's longjmp fails CFG's check, #337).
 // *error: 0 = started that way; else why not (then it was started normally, or not at all if that failed too)
 PlatProc plat_spawn_no_cfg(const char *const argv[], const char *log_path, bool append_log, unsigned long *error);
+// For a report: why the last plat_spawn on this thread returned 0 (GetLastError; *log_file: opening its log failed, not
+// starting it), and the last plat_proc_wait's full exit code on this thread (an NTSTATUS such as 0xC0000005)
+unsigned long plat_spawn_error(bool *log_file);
+unsigned long plat_proc_exit_code(void);
 #endif
 void plat_proc_kill(PlatProc p);             // end it and what it started (then it's gone: no wait)
 bool plat_remove_tree(const char *dir);      // rm -rf

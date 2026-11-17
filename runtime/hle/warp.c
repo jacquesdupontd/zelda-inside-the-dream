@@ -100,7 +100,7 @@ int game_in_play(void) {
 // Read-only benchmark context. HP is stored in quarter-hearts in the live save
 // (same layout as runtime/ui/cheats.mm); a loaded player can still be dying.
 int game_health_quarters(void) {
-    return game_in_play() ? (int16_t)LD16(MAIN_BASE + 0x1CBB220 + 0x5544) : -1;
+    return game_in_play() ? (int16_t)LD16(GA(LIVE_SAVE) + 0x5544) : -1;
 }
 
 int warp_available(void) { return game_in_play(); }

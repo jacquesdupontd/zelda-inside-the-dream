@@ -5,6 +5,7 @@
 
 #include <dirent.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -117,6 +118,98 @@ static void stop(PlatProc p) {  // ends one that is still running, then forgotte
 }
 
 static void sleep_ms(int ms) { plat_sleep_until_ns(plat_now_ns() + (uint64_t)ms * 1000000ull); }
+
+// ------------------------------------------------------------------ the failure, as the player can send it
+// Everything known about the last failure (gamebuild_failure_details: which helper, how it was started, how it ended,
+// the end of its log) and the one line the start screen shows under the reason (gamebuild_failure_detail). The start
+// screen writes them to disk (runtime/ui/launcher.mm, setup-report.txt): a failure said only « make sure there's about
+// 2 GB free » to a player who had plenty, while its reason - a generator assertion - was in the log (Discord #36).
+static char g_details[12288], g_detail[320];
+static bool file_exists(const char *p);
+static void details(const char *fmt, ...) {
+    size_t n = strlen(g_details);
+    if (n + 1 >= sizeof g_details) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(g_details + n, sizeof g_details - n, fmt, ap);
+    va_end(ap);
+}
+static void details_args(char *const *argv) {  // the command line, as it was given
+    details("  command:");
+    for (int i = 0; argv && argv[i]; i++) details(strpbrk(argv[i], " \t") ? " \"%s\"" : " %s", argv[i]);
+    details("\n");
+}
+static void details_log(const char *path, int lines) {  // a helper's log: its last lines
+    FILE *f = fopen(path, "rb");
+    if (!f) { details("  its log (%s): can't be read\n", path); return; }
+    static char buf[8192];
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, size > (long)sizeof buf - 1 ? size - (long)sizeof buf + 1 : 0, SEEK_SET);
+    size_t k = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[k] = 0;
+    while (k && (buf[k - 1] == '\n' || buf[k - 1] == '\r')) buf[--k] = 0;
+    char *start = buf;  // (back from the end over `lines` line breaks)
+    for (int seen = 0; k > 0; k--)
+        if (buf[k - 1] == '\n' && ++seen >= lines) { start = buf + k; break; }
+    details("  its log (%s), %ld bytes, the end:\n", path, size);
+    for (char *l = strtok(start, "\n"); l; l = strtok(NULL, "\n")) {
+        size_t m = strlen(l);
+        if (m && l[m - 1] == '\r') l[m - 1] = 0;
+        if (strstr(l, ": progress ")) continue;  // (the generator's progress lines)
+        details("    | %s\n", l);
+    }
+}
+#ifdef _WIN32
+// what a helper's NTSTATUS / exit code says, and why Windows wouldn't start one (GetLastError)
+static const char *win_status_text(unsigned long c) {
+    switch (c) {
+    case 1: return "it stopped on an error (its log says which)";
+    case 0xC0000005: return "it crashed (access violation)";
+    case 0xC0000017: case 0xC000012D: return "out of memory";
+    case 0xC0000022: return "access denied (an antivirus, or the folder's permissions)";
+    case 0xC000007B: return "a DLL it loads is damaged or for another system";
+    case 0xC0000135: return "a DLL it needs is missing (an antivirus may have removed it, or the folder is incomplete)";
+    case 0xC0000142: return "a DLL it loads failed to start";
+    case 0xC00000FD: return "stack overflow";
+    case 0xC000013A: return "stopped (the system shutting down, or Ctrl+C)";
+    case 0xC0000409: return "a security check stopped it (Control Flow Guard, Windows Security > Exploit protection)";
+    }
+    return NULL;
+}
+static const char *win_error_text(unsigned long e) {
+    switch (e) {
+    case 2: case 3: return "the file isn't there (an antivirus may have quarantined it, or the folder is incomplete)";
+    case 5: return "access denied (an antivirus, Windows Security's Controlled folder access, or the folder's permissions)";
+    case 32: return "the file is in use by another program";
+    case 112: return "the disk is full";
+    case 193: return "not a valid program (a damaged or incomplete download)";
+    case 206: return "the path is too long for Windows (move the app to a shorter folder, e.g. C:\\Games)";
+    case 225: return "Windows Security reported it as a threat and blocked it";
+    case 226: return "Windows Security removed it";
+    case 1260: return "blocked by a Windows policy (Smart App Control, AppLocker or Software Restriction Policies)";
+    case 4551: return "blocked by Smart App Control (Windows Defender Application Control)";
+    }
+    return NULL;
+}
+#endif
+// A helper that didn't start: what, its command, and what the system says
+static void start_failed(const char *what, char *const *argv) {
+    details("%s didn't start\n", what);
+    details_args(argv);
+    bool there = argv && argv[0] && file_exists(argv[0]);
+    details("  the program %s\n", there ? "is there" : "ISN'T THERE (moved, deleted or quarantined by an antivirus)");
+#ifdef _WIN32
+    bool log_file = false;
+    unsigned long e = plat_spawn_error(&log_file);
+    const char *t = win_error_text(e);
+    details("  Windows: error %lu%s%s%s\n", e, log_file ? " opening its log file" : "", t ? ": " : "", t ? t : "");
+    snprintf(g_detail, sizeof g_detail, "%s: Windows error %lu%s%s", what, e, t ? ", " : "", t ? t : "");
+#else
+    snprintf(g_detail, sizeof g_detail, "%s didn't start%s", what, there ? "" : ": the program isn't there");
+#endif
+}
 
 // ------------------------------------------------------------------ argument lists
 typedef struct { char **v; int n, cap; } Args;
@@ -499,7 +592,7 @@ static void compiler(Args *a, const Tools *t) {
 // ------------------------------------------------------------------ generator progress (its log)
 typedef struct {
     const char *name;
-    char log[1100], out[1100];
+    char log[1100], out[1100], cmd[2400];
     PlatProc p;
     int exit;                // -1 while running
     int files;               // chunk files written so far (complete)
@@ -571,10 +664,37 @@ static void helper_failed(const char *what, int r, const char *log, char *why, s
         snprintf(how, sizeof how, "exit status %d", r);
     }
     LOG("[gamebuild] %s failed: %s%s%s\n", what, how, how[0] && last[0] ? ": " : "", last);
+    char status[200];
+#ifdef _WIN32
+    unsigned long code = r == PLAT_PROC_FAST_FAIL ? 0xC0000409ul : plat_proc_exit_code();
+    const char *t = win_status_text(code);
+    snprintf(status, sizeof status, code > 255 ? "exit code 0x%08lX%s%s" : "exit code %lu%s%s", code, t ? ": " : "", t ? t : "");
+#else
+    snprintf(status, sizeof status, "%s", how[0] ? how : r == 0 ? "exit status 0" : "");
+    if (!status[0]) snprintf(status, sizeof status, "exit status %d", r);
+#endif
+    details("%s failed: %s\n", what, status);
+    details_log(log, 40);
+    // (the line under the reason: the log's last, which names the error - « AssertionError: 0x... » - or how it ended)
+    snprintf(g_detail, sizeof g_detail, "%s: %s", what, last[0] ? last : status);
 }
 
 bool gamebuild_killed(void) { return g_killed; }
 bool gamebuild_cfg_stopped(void) { return g_cfg_stopped; }
+const char *gamebuild_failure_detail(void) { return g_detail; }
+const char *gamebuild_failure_details(void) { return g_details; }
+
+// The game version's first-person sites the generator left out (tools/patches.py: on a version they don't fit, the
+// game code builds without them), from its log into ours
+static void log_left_out(const char *gen_log) {
+    FILE *f = fopen(gen_log, "rb");
+    if (!f) return;
+    char line[400];
+    int n = 0;
+    while (fgets(line, sizeof line, f))
+        if (strstr(line, "first-person site") && strstr(line, "left out") && n++ < 8) LOG("[gamebuild] %s", line);
+    fclose(f);
+}
 
 // ------------------------------------------------------------------ compiling
 typedef struct {
@@ -636,6 +756,7 @@ static PlatProc start_compile(const Tools *t, const Unit *u) {
     add(&a, "-o");
     add(&a, u->tmp);
     PlatProc p = spawn(a.v, u->log);
+    if (!p && !g_quitting) start_failed("The compiler", a.v);
     args_free(&a);
     return p;
 }
@@ -646,16 +767,39 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     static bool registered;
     if (!registered) registered = true, atexit(end_all);
     g_killed = false, g_cfg_stopped = false;
+    g_details[0] = g_detail[0] = 0;
     bool ios = o->target == GAMEBUILD_IOS;
+    details("game files: %s\n", game_dir);
     if (!gamelib_full_id_for(ios ? GAMELIB_IOS_ID : GAMELIB_ID, game_dir, g_full_id, sizeof g_full_id)) {
         snprintf(why, why_size, LN("the game files' exefs/main is missing or unreadable"));
+        details("%s\n", why);
         return false;
     }
+    details("game code id: %s\n", g_full_id);
     Tools t;
     if (ios ? !find_ios_tools(&t, o->ios_kit, o->progress, why, why_size) : !find_tools(&t)) {
         if (!ios) snprintf(why, why_size, LN("the game code builder is missing from this copy of LAS Recomp"));
+        details("%s\n", why);
+#ifndef __ANDROID__
+        if (!ios) {  // (which of its pieces: an antivirus quarantines a helper, an unzip stops partway)
+            static const char *const parts[] = {"lasgen" SEP "lasgen" PLAT_EXE_SUFFIX, "zig" SEP "zig" PLAT_EXE_SUFFIX,
+                                                "gamelib-src" SEP "cpu.h", "gamelib-src" SEP "gamelib_entry.c",
+                                                "gamelib-src" SEP "hle_symbols.txt",
+#ifdef _WIN32
+                                                "lasrecomp.dll.a",
+#endif
+            };
+            char p[1100];
+            for (size_t i = 0; i < sizeof parts / sizeof *parts; i++) {
+                bool there = rt_resource(parts[i], NULL, p, sizeof p);
+                details("  %s: %s\n", parts[i], there ? "there" : "MISSING");
+                if (!there && !g_detail[0]) snprintf(g_detail, sizeof g_detail, "missing: %s (next to the program)", parts[i]);
+            }
+        }
+#endif
         return false;
     }
+    details("generator: %s%s%s\ncompiler: %s%s\n", t.gen, t.gen_script[0] ? " " : "", t.gen_script, t.cc, t.zig ? " cc" : "");
 #ifdef __ANDROID__
     {   // the activity unpacks the builder's files once per install or update, on a thread of its own: wait for that
         char ready[1200];
@@ -781,7 +925,12 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
             add(&a, "--dyn-base");
 #endif
         }
+        g->cmd[0] = 0;  // (its command, for a failure's report)
+        for (int k = 0; k < a.n && strlen(g->cmd) + strlen(a.v[k]) + 4 < sizeof g->cmd; k++)
+            snprintf(g->cmd + strlen(g->cmd), sizeof g->cmd - strlen(g->cmd), strpbrk(a.v[k], " \t") ? "%s\"%s\"" : "%s%s",
+                     k ? " " : "", a.v[k]);
         g->p = spawn_proc(a.v, g->log, true);
+        if (!g->p) start_failed("The game code generator", a.v);
         args_free(&a);
         if (!g->p) { snprintf(why, why_size, LN("the game code builder didn't start")); ok = false; }
     }
@@ -818,6 +967,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
                         char what[64];
                         snprintf(what, sizeof what, "generator (%s)", g->name);
                         snprintf(why, why_size, LN("the game code couldn't be prepared"));
+                        details("  command: %s\n", g->cmd);
                         helper_failed(what, r, g->log, why, why_size);
 #ifdef _WIN32
                         if (r == PLAT_PROC_FAST_FAIL) g_cfg_stopped = true;  // (#337)
@@ -825,6 +975,8 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
                         ok = false;
                     } else if (!build_cache_save_generation(cache, g->name, g->files, why, why_size)) {
                         ok = false;
+                    } else {
+                        log_left_out(g->log);
                     }
                 }
             }
@@ -960,6 +1112,9 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
 #endif
         }
         PlatProc p = f ? spawn(a.v, log) : 0;
+        if (!f) details("couldn't write the linker's list of objects %s\n", rsp);
+        else if (!p && !g_quitting) start_failed("The linker", a.v);
+        else details_args(a.v);  // (the link's command: a failure below has its log)
         args_free(&a);
         int r = p ? -1 : 255;
         while (p && (r = finished(p)) < 0) {
@@ -982,6 +1137,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     }
     if (ok) ok = build_cache_publish(cache, lib_name, g_full_id, why, why_size);
     bool cancelled = !ok && o->cancelled && o->cancelled();
+    if (!ok && !cancelled) details("result: %s (reused %d objects, compiled %d)\n", why, reused, compiled);
     if (!ok && !cancelled) build_cache_failed(cache);
     free(units.u);
     build_cache_close(cache);

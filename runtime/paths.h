@@ -71,6 +71,9 @@ bool rt_remove_game_files(const char *game_dir);
 unsigned long long rt_game_files_size(const char *game_dir);
 // Bytes taken by everything under path (links not followed).
 unsigned long long rt_tree_size(const char *path);
+// Bytes free for this user on the disk dir is on (0: unknown)
+unsigned long long rt_free_space(const char *dir);
+bool rt_disk_name(const char *dir, char *out, size_t n);  // (Windows: "C:"; false elsewhere)
 
 typedef struct SDL_Window SDL_Window;
 void rt_window_icon(SDL_Window *w);  // the shipped icon.png, if any

@@ -281,6 +281,14 @@ void romfs_layout_free(RomfsLayout *l) {
 }
 
 // ------------------------------------------------------------------ copying the player's folder
+// The copy's failure, for the setup report (romfs_copy_error): which file, and the system's reason
+static char g_copy_err[1400];
+const char *romfs_copy_error(void) { return g_copy_err; }
+static void copy_failed(const char *what, const char *path) {
+    snprintf(g_copy_err, sizeof g_copy_err, "couldn't %s %s: %s (errno %d)", what, path, strerror(errno), errno);
+    fprintf(stderr, "[setup] %s\n", g_copy_err);
+}
+
 static bool copy_file(const char *src, const char *dst, uint64_t size, uint64_t *done, uint64_t total,
                       void (*progress)(uint64_t, uint64_t)) {
     remove(dst);
@@ -294,17 +302,22 @@ static bool copy_file(const char *src, const char *dst, uint64_t size, uint64_t 
 #endif
     {
         FILE *in = fopen(src, "rb"), *out = in ? fopen(dst, "wb") : NULL;
+        if (!in) copy_failed("read", src);
+        else if (!out) copy_failed("create", dst);
         bool ok = in && out;
         static uint8_t buf[1 << 20];
         while (ok) {
             size_t n = fread(buf, 1, sizeof buf, in);
-            if (!n) break;
-            if (fwrite(buf, 1, n, out) != n) ok = false;
+            if (!n) {
+                if (ferror(in)) copy_failed("read", src), ok = false;  // (a cloud file not downloaded, a disk error)
+                break;
+            }
+            if (fwrite(buf, 1, n, out) != n) copy_failed("write", dst), ok = false;  // (a full disk: ENOSPC)
             *done += n;
             if (progress) progress(*done, total);
         }
         if (in) fclose(in);
-        if (out && fclose(out) != 0) ok = false;
+        if (out && fclose(out) != 0 && ok) copy_failed("finish writing", dst), ok = false;
         return ok;
     }
 linked:
@@ -314,7 +327,7 @@ linked:
 }
 
 static bool copy_dir(Dir *d, const char *dst, uint64_t *done, uint64_t total, void (*progress)(uint64_t, uint64_t)) {
-    mkdir(dst, 0755);
+    if (mkdir(dst, 0755) != 0 && errno != EEXIST) { copy_failed("create the folder", dst); return false; }
     for (int i = 0; i < d->nfiles; i++) {
         size_t n = strlen(dst) + strlen(d->files[i]->name) + 2;
         char *p = malloc(n);
@@ -342,8 +355,9 @@ bool romfs_copy_file(const char *src, const char *dst) {
 }
 
 bool romfs_copy_tree(const char *src, const char *dst, void (*progress)(uint64_t, uint64_t)) {
+    g_copy_err[0] = 0;
     Dir *t = scan(src, "", NULL, 0);
-    if (!t) return false;
+    if (!t) { copy_failed("open the folder", src); return false; }
     Lists l = {0};
     flatten(t, &l);
     uint64_t total = 0, done = 0;

@@ -6689,6 +6689,7 @@ static bool topology(uint32_t mode, VkPrimitiveTopology *t, uint8_t *cls) {
 #include "../fp_sky.h"
 static bool g_fp_sky_pending;  // the composite is being drawn: the sky follows it
 static uint64_t g_hud_after = UINT64_MAX;  // (LARECOMP_HIDE_HUD) the frame whose composite is drawn: what follows is the HUD
+static float g_present_pv[8];              // (below, with the present: its flip - the headset's text panel reads it)
 
 // ---- first person at the display's rate (device.c, the presenter, LARECOMP_FP_WARP): each frame's 3D image without
 // the HUD, as renderer.m fp_scene_*. The presenter turns the image to the view of each refresh; the HUD drawn into it
@@ -7353,12 +7354,16 @@ static void draw_(CmdRec *r, bool indexed) {
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
     Prog *pr = get_program(st.program, &vkey, &fkey);
     if (!pr || atomic_load(&pr->state) != 1) { SKIP(!pr ? SK_NO_STAGES : atomic_load(&pr->state) == 2 ? SK_PROG_FAILED : SK_PROG_BUILDING); return; }
+    // (drawn into the window image after this frame's scene composite: the game's 2D overlay - read before this draw,
+    //  which may be that composite, says so below)
+    const bool after_composite = g_hud_after == renderer_exec_frame() && st.rt.ncolor && st.rt.color[0] &&
+                                 renderer_texture_presented(st.rt.color[0]);
     {   // LARECOMP_HIDE_HUD=1 (the trailer's shooting, 28/10): what the game draws into the window image after the frame's
         // scene composite - hearts, items, place names, prompts - left out, in every view and through the R3 flight (the
         // presenter's way, the 3D image taken from under the HUD, only had it in first person: the dive kept its hearts)
         static int hide = -1;
         if (hide < 0) hide = getenv("LARECOMP_HIDE_HUD") && atoi(getenv("LARECOMP_HIDE_HUD")) ? 1 : 0;
-        if (hide && g_hud_after == renderer_exec_frame() && st.rt.ncolor && st.rt.color[0] && renderer_texture_presented(st.rt.color[0])) {
+        if (hide && after_composite) {
             stat_skipped++;
             return;
         }
@@ -7939,6 +7944,44 @@ static void draw_(CmdRec *r, bool indexed) {
             hud_u = hud_corners_ubo((const float *)(uintptr_t)st.ubuf[0][0].addr, st.ubuf[0][0].size, hud_k, hud_ky);
             extern const void *pause_fill_ubo(const float *u, uint64_t size, float k, float ky);  // (the pause screen's backdrop)
             if (!hud_u) hud_u = pause_fill_ubo((const float *)(uintptr_t)st.ubuf[0][0].addr, st.ubuf[0][0].size, hud_k, hud_ky);
+        }
+    }
+    {   // A headset, the view from his eyes: the game's 2D overlay - the dialogue box, the hearts, the buttons - onto a panel
+        // in the room, at eye level, smaller than the field (runtime/hle/firstperson.c fp_xr_hud_place, Discord #42: drawn
+        // as the game draws it, it lay 30 degrees down and turned with the face). Its draws are scaled about the 16:9
+        // band's centre and moved to where the panel falls in this image; a fill of the whole image (the fades at the
+        // doors) and what reads a window-sized image back (the scene, a blur of it) stay as drawn. LARECOMP_XR_TEXT_TEST=1:
+        // on a screen too, with LARECOMP_FP_XR_TEST's view (a test without a headset).
+        static int test = -1;
+        if (test < 0) test = getenv("LARECOMP_XR_TEXT_TEST") && atoi(getenv("LARECOMP_XR_TEXT_TEST"));
+        float hcx, hcy, hw;
+        extern bool fp_xr_hud_place(float *cx, float *cy, float *width);
+        if (after_composite && !hud_u && (vk_xr_headset() || test) && fp_xr_hud_place(&hcx, &hcy, &hw)) {
+            NvnTexture *wt = st.rt.color[0];
+            bool covers = st.viewport[0][0] <= 0 && st.viewport[0][1] <= 0 && st.viewport[0][0] + st.viewport[0][2] >= wt->width &&
+                          st.viewport[0][1] + st.viewport[0][3] >= wt->height;
+            bool reads = false;
+            for (int i = 0; i < pr->fi->ntex && i < 64; i++)
+                reads |= tex_wh[1][i][0] == wt->width && tex_wh[1][i][1] == wt->height;
+            extern bool widescreen_ui_pane_partial(const float *u, uint64_t size);
+            bool fill = covers && r->x[2] <= 6 && pr->fi->ntex == 0 &&
+                        !widescreen_ui_pane_partial((const float *)(uintptr_t)st.ubuf[0][0].addr, st.ubuf[0][0].size);
+            int pw, ph;
+            pass_size(&pw, &ph);
+            float uw = wt->width * vp_sx, uh = wt->height * vp_sy, bw = fminf(uw, uh * 16.0f / 9.0f);
+            if (!fill && !(covers && reads) && pw > 0 && ph > 0 && bw > 0) {
+                float k = hw * (float)pw / bw, ox = vp_ox + uw / 2, oy = vp_oy + uh / 2;
+                if (g_present_pv[0] > 0.5f) hcy = 1 - hcy;  // (the window image stored bottom-up: the present flips it)
+                vp_ox = (vp_ox - ox) * k + hcx * (float)pw, vp_oy = (vp_oy - oy) * k + hcy * (float)ph;
+                vp_sx *= k, vp_sy *= k;  // (the viewport and the scissor follow, below, and the fragment stage's window
+                                         //  coordinates: rs0)
+                static uint64_t said;
+                if (ENVC("LARECOMP_LOG_XR_TEXT") && renderer_present_count() - said >= 120) {
+                    said = renderer_present_count();
+                    LOG("[xr-text] panel centre %.3f %.3f of the image, %.3f wide (x%.3f), image %dx%d, band %.0f px%s\n", hcx, hcy, hw,
+                        k, pw, ph, bw, g_present_pv[0] > 0.5f ? ", stored bottom-up" : "");
+                }
+            }
         }
     }
     Range hud_ubuf = st.ubuf[0][0];

@@ -774,6 +774,14 @@ typedef struct { HANDLE process, job; } WinProcess;
 #define PROCESS_CREATION_MITIGATION_POLICY_CONTROL_FLOW_GUARD_ALWAYS_OFF (0x00000002ull << 40)
 #endif
 
+// The last start that failed on this thread (GetLastError: 2 not found, 5 access denied, 225 / 226 an antivirus,
+// 1260 / 4551 a policy such as Smart App Control) and the last helper's exit code before plat_proc_wait folds it to a
+// byte (0xC0000005: it crashed): for the setup report (runtime/gamebuild.c)
+static __thread unsigned long g_spawn_error, g_exit_code;
+static __thread bool g_spawn_error_log;  // (the failure was opening the helper's log, not starting it)
+unsigned long plat_spawn_error(bool *log_file) { if (log_file) *log_file = g_spawn_error_log; return g_spawn_error; }
+unsigned long plat_proc_exit_code(void) { return g_exit_code; }
+
 // no_cfg: NULL = a plain start; else *no_cfg = 0 when the child runs with CFG off, or the error that prevented it
 // (then it is started without the policy)
 static PlatProc spawn_child(const char *const argv[], const char *log_path, bool append_log, unsigned long *no_cfg) {
@@ -786,7 +794,11 @@ static PlatProc spawn_child(const char *const argv[], const char *log_path, bool
     SECURITY_ATTRIBUTES sa = {.nLength = sizeof sa, .bInheritHandle = TRUE};
     HANDLE log = CreateFileW(wlog, append_log ? FILE_APPEND_DATA : GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
                              &sa, append_log ? OPEN_ALWAYS : CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (log == INVALID_HANDLE_VALUE) return 0;
+    if (log == INVALID_HANDLE_VALUE) {
+        g_spawn_error = GetLastError(), g_spawn_error_log = true;
+        fprintf(stderr, "[plat] could not open the log %s for %s (error %lu)\n", log_path ? log_path : "NUL", argv[0], g_spawn_error);
+        return 0;
+    }
     STARTUPINFOW si = {.cb = sizeof si, .dwFlags = STARTF_USESTDHANDLES, .hStdInput = NULL, .hStdOutput = log,
                        .hStdError = log};
     PROCESS_INFORMATION pi;
@@ -824,7 +836,10 @@ static PlatProc spawn_child(const char *const argv[], const char *log_path, bool
         }
     }
     if (!ok) ok = CreateProcessW(app, wcmd, NULL, NULL, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED, NULL, NULL, &si, &pi);
-    if (!ok) fprintf(stderr, "[plat] could not start %s (error %lu)\n", argv[0], GetLastError());
+    if (!ok) {
+        g_spawn_error = GetLastError(), g_spawn_error_log = false;
+        fprintf(stderr, "[plat] could not start %s (error %lu)\n", argv[0], g_spawn_error);
+    }
     CloseHandle(log);
     if (!ok) return 0;
     // A separate job per helper: cancelling one compiler also stops its children immediately,
@@ -879,6 +894,7 @@ int plat_proc_wait(PlatProc p, bool block) {
     if (w == WAIT_TIMEOUT) return -1;
     DWORD code = 255;
     if (w == WAIT_OBJECT_0) GetExitCodeProcess(child->process, &code);
+    g_exit_code = code;
     CloseHandle(child->process);
     if (child->job) CloseHandle(child->job);
     free(child);

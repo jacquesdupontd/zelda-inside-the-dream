@@ -5,6 +5,7 @@ projection aspect. These loads are redirected to rt_aspect_site(), which returns
 current output shape (or 16:9) per site, so only the 3D cameras widen.
 """
 import struct
+import sys
 from game_addresses import ADDRESS as A, addr_text
 
 ASPECT_LITERAL = A.ASPECT_LITERAL
@@ -52,16 +53,50 @@ PATCHES[CULL_ASPECT] = _cull_aspect
 # back for each, which creates the terrain cells there): right after the game's own query, runtime/hle/firstperson.c
 # may give a second box, far ahead in the first-person view - the game loads the cells there with its own models,
 # without the ones between (Guillaume, 20/10: « afficher des cases ultra lointaines sans afficher les cases entre »).
-FAR_QUERY_SITE = 0x70008f0fd4
+FAR_QUERY_SITE = A.FAR_QUERY_SITE
+
+
+# Inside The Dream's first-person sites (this one and the four below) were read on the game's 1.0.0 only: where the
+# instruction isn't the one expected (another game version whose table entry is a guess), the site is LEFT OUT - the
+# instruction lifted as it is, one line in the generator's log - so the game code still builds and plays, the
+# first-person view without that refinement. An assert here stopped the whole setup on 1.0.1 / 1.1.0 (Discord #36,
+# 17/11/2026: « The game code didn't build »). The calls and branches they keep are read from the instructions
+# themselves, never from 1.0.0's addresses.
+FP_LEFT_OUT = []
+
+
+def _fp_site(gen, a, want, what):
+    """The word at a if it is want; else None, and the site is left out (said once in the generator's log)."""
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    if w == want:
+        return w
+    if a not in FP_LEFT_OUT:
+        FP_LEFT_OUT.append(a)
+        print(f'main: first-person site {a:#x} ({what}) left out: instruction {w:#010x}, expected {want:#010x}',
+              file=sys.stderr)
+    return None
+
+
+def _branch_target(w, a):  # b / bl: imm26 words from the instruction
+    imm = w & 0x3ffffff
+    return a + ((imm - (1 << 26)) if imm & (1 << 25) else imm) * 4
 
 
 def _far_query(gen, a):
-    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
-    assert w == 0xf94013e0, hex(w)  # ldr x0, [sp, #0x20] (after bl f_70008e76e0)
-    return ('{ extern uint64_t rt_far_query(uint64_t lr, uint64_t query); '
+    if _fp_site(gen, a, 0xf94013e0, 'the far tree query') is None:  # ldr x0, [sp, #0x20] (after bl f_70008e76e0)
+        return None
+    bl = struct.unpack_from('<I', gen.nso.image, a - 4 - gen.base)[0]
+    if bl & 0xfc000000 != 0x94000000:  # (the tree walk's call, just before)
+        if a not in FP_LEFT_OUT:
+            FP_LEFT_OUT.append(a)
+            print(f'main: first-person site {a:#x} (the far tree query) left out: no call before it ({bl:#010x})',
+                  file=sys.stderr)
+        return None
+    walk = _branch_target(bl, a - 4)
+    return ('{ extern uint64_t rt_far_query(uint64_t lr, uint64_t query); '  # (the walk: declared by the call before)
             'uint64_t q = rt_far_query(LD64(c->sp + 0x58), c->x[20]); '
             'if (q) { c->x[0] = c->x[22]; c->x[1] = c->x[19] + 0x18; c->x[2] = c->x[19]; c->x[3] = q; c->x[4] = c->sp; '
-            'c->x[30] = 0x70008f0fd4ull; f_70008e76e0(c); } } '
+            f'c->x[30] = {a:#x}ull; f_{walk:x}(c); }} }} '
             '{ uint64_t ea = c->sp + 0x20ull; uint64_t v = LD64(ea); c->x[0] = (uint64_t)(v); }'
             f'  /* {a:#x}: ldr x0, [sp, #0x20] (the tree query: a far box after the game\'s) */')
 
@@ -73,15 +108,17 @@ PATCHES[FAR_QUERY_SITE] = _far_query
 # x27 + 0x610): after loading, it hides the loaded cells - their models and actors - whose box that frustum misses (a 4th
 # tree query; read by Gemini 27/10). runtime/hle/firstperson.c may hand it another frustum: in first person, every cell
 # loaded is shown and the eye's own frustum chooses what is drawn. The instruction kept: bl f_700085c280.
-CELLS_UPDATE_SITE = 0x7000852d10
+CELLS_UPDATE_SITE = A.CELLS_UPDATE_SITE
 
 
 def _cells_update(gen, a):
-    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
-    assert w == 0x9400255c, hex(w)  # bl 0x700085c280
+    w = _fp_site(gen, a, 0x9400255c, 'the cells update')  # bl 0x700085c280 (1.0.0)
+    if w is None:
+        return None
+    t = _branch_target(w, a)
     return ('{ extern uint64_t rt_cells_frustum(uint64_t); uint64_t f = rt_cells_frustum(c->x[1]); if (f) c->x[1] = f; } '
-            '{ extern void f_700085c280(Cpu *); c->x[30] = 0x7000852d14ull; f_700085c280(c); }'
-            f'  /* {a:#x}: bl 0x700085c280 (the cells update, with the frustum that hides cells) */')
+            f'{{ extern void f_{t:x}(Cpu *); c->x[30] = {a + 4:#x}ull; f_{t:x}(c); }}'
+            f'  /* {a:#x}: bl {t:#x} (the cells update, with the frustum that hides cells) */')
 
 
 PATCHES[CELLS_UPDATE_SITE] = _cells_update
@@ -97,11 +134,11 @@ def _fovy_load(gen, a):
     want, rn = FOVY_SITES[a]
     assert w == want, hex(w)
     rt = w & 31
-    if a == 0x7000010914:  # the main camera: its object goes to the runtime too (first-person view, rt_fovy_cam)
+    if a == A.FOVY_SITES_0:  # the main camera: its object goes to the runtime too (first-person view, rt_fovy_cam)
         return ('{ extern float rt_fovy_cam(uint64_t, float); float o; '
                 f'memcpy(&o, (const void *)(uintptr_t)(c->x[{rn}] + 0x564), 4); float f = rt_fovy_cam(c->x[{rn}], o); '
                 f'c->v[{rt}] = 0; memcpy(&c->v[{rt}], &f, 4); }}  /* {a:#x}: ldr s{rt}, [x{rn}, #0x564] (fovy) */')
-    fn = 'rt_cull_fovy' if a == 0x7000852ad0 else 'rt_fovy'  # (culling: widened in first-person view)
+    fn = 'rt_cull_fovy' if a == A.FOVY_SITES_1 else 'rt_fovy'  # (culling: widened in first-person view)
     return (f'{{ extern float {fn}(float); float o; '
             f'memcpy(&o, (const void *)(uintptr_t)(c->x[{rn}] + 0x564), 4); float f = {fn}(o); '
             f'c->v[{rt}] = 0; memcpy(&c->v[{rt}], &f, 4); }}  /* {a:#x}: ldr s{rt}, [x{rn}, #0x564] (fovy) */')
@@ -114,12 +151,12 @@ for _a in FOVY_SITES:
 # The main camera's update (f_7000010540), right after it takes the camera object and before it builds the frame's
 # view from its eye (+0x320) and target (+0x3f0): the runtime may move them there (first-person view: which camera
 # chooses the island cells the game draws?). The instruction kept: ldr x24, [x23, #0x2a8].
-CAM_BEGIN_SITE = 0x70000105dc
+CAM_BEGIN_SITE = A.CAM_BEGIN_SITE
 
 
 def _cam_begin(gen, a):
-    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
-    assert w == 0xf94156f8, hex(w)
+    if _fp_site(gen, a, 0xf94156f8, 'the main camera') is None:
+        return None
     return ('{ extern void rt_cam_begin(uint64_t); rt_cam_begin(c->x[23]); } '
             '{ uint64_t ea = c->x[23] + 0x2a8ull; uint64_t v = LD64(ea); c->x[24] = (uint64_t)(v); }'
             f'  /* {a:#x}: ldr x24, [x23, #0x2a8] (the main camera, before its view is built) */')
@@ -132,14 +169,16 @@ PATCHES[CAM_BEGIN_SITE] = _cam_begin
 # world box at +0xe0 / +0xf0, six planes from +0x100, their count at +0x1c0): the runtime may replace them before
 # anything is culled with them (first-person view: the game culls with what Link's eye sees). The instruction kept:
 # b 0x7001025ec4.
-FRUSTUM_DONE_SITE = 0x7001026834
+FRUSTUM_DONE_SITE = A.FRUSTUM_DONE_SITE
 
 
 def _frustum_done(gen, a):
-    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
-    assert w == 0x17fffda4, hex(w)
-    return ('{ extern void rt_frustum_ready(uint64_t); rt_frustum_ready(c->x[19]); } goto L_7001025ec4;'
-            f'  /* {a:#x}: b 0x7001025ec4 (a camera frustum just computed) */')
+    w = _fp_site(gen, a, 0x17fffda4, 'a camera frustum')  # b 0x7001025ec4 (1.0.0)
+    if w is None:
+        return None
+    t = _branch_target(w, a)
+    return (f'{{ extern void rt_frustum_ready(uint64_t); rt_frustum_ready(c->x[19]); }} goto L_{t:x};'
+            f'  /* {a:#x}: b {t:#x} (a camera frustum just computed) */')
 
 
 PATCHES[FRUSTUM_DONE_SITE] = _frustum_done
@@ -148,12 +187,12 @@ PATCHES[FRUSTUM_DONE_SITE] = _frustum_done
 # The sphere-against-frustum test (f_7001130090: x0 a frustum, x1 a sphere - centre, radius at +0x10; returns 1 when
 # inside), at its first instruction: the runtime may leave a model out before the planes are tried (first-person view:
 # small things far away). The instruction kept: ldrsw x8, [x0, #0xe0] (the planes' count).
-SPHERE_TEST_SITE = 0x7001130090
+SPHERE_TEST_SITE = A.SPHERE_TEST_SITE
 
 
 def _sphere_test(gen, a):
-    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
-    assert w == 0xb980e008, hex(w)
+    if _fp_site(gen, a, 0xb980e008, 'the sphere test') is None:
+        return None
     return ('{ extern int rt_cull_sphere(uint64_t, uint64_t); if (rt_cull_sphere(c->x[0], c->x[1])) { c->x[0] = 0; return; } } '
             '{ uint64_t ea = c->x[0] + 0xe0ull; uint64_t v = (uint64_t)(int64_t)(int32_t)LD32(ea); c->x[8] = (uint64_t)(v); }'
             f'  /* {a:#x}: ldrsw x8, [x0, #0xe0] (a sphere against a frustum) */')

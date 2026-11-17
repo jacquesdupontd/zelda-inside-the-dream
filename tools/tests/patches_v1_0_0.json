@@ -1,5 +1,5 @@
 {
-  "baseline": "beta_5 e97402064f948df563580ef435e42afea502d117",
+  "baseline": "beta_5 e97402064f948df563580ef435e42afea502d117; Inside The Dream fusion-beta6 (first-person sites, fovy / sky-sea / prompt changes), 17/11/2026",
   "patches": {
     "700001092c": {
       "word": "bd4ba520",
@@ -31,19 +31,19 @@
     },
     "70008fb1b8": {
       "word": "3dc0bae1",
-      "sha256": "17a6f0203e6e40e4014dfec4381a5a7360529a13ef29b354a57e997fee2a7ca6"
+      "sha256": "87cc769600861af25839a449c7a0d2592d02512d90d583273ee96a1aacca3865"
     },
     "70008fb1c4": {
       "word": "3dc0b6e2",
-      "sha256": "1ecc3445628aa75d52c5fd95f74177f263d6ba95aff0d2860242e82f075173cd"
+      "sha256": "eb53f7c38f5db7e2766e92b686359affe3cf7c5563092092bc348bb3b46b54ac"
     },
     "7000010914": {
       "word": "bd4566e0",
-      "sha256": "d8d62c7c6fe576f1a12b6980025853eca9d1ddb5dd4db39ebd2ba6147b3cdea5"
+      "sha256": "47d2795579b672528b865922f8380aed43bd0b22bcd96107035ec430067a14c2"
     },
     "7000852ad0": {
       "word": "bd456768",
-      "sha256": "a2e24fefe216027dc8c89953586555a887dbe9a364141eabd90865c67b134c43"
+      "sha256": "a7cfff5662da5be09b04abdbf70d909eb5a7300b13c0d14adc3bab182171ab4f"
     },
     "7001023c70": {
       "word": "bd4ba541",
@@ -203,7 +203,7 @@
     },
     "7000eab138": {
       "word": "2d060102",
-      "sha256": "3809979dea3ac6b73a1399ee714ac9e264e285092d3c83a76e46a7425ee587f4"
+      "sha256": "59cc42045b6d2710c2de2f675c9f5ca0473eab97d0335e53a983c14b68887ef5"
     },
     "70010cce50": {
       "word": "aa0003e1",
@@ -376,6 +376,27 @@
     "7000d52f78": {
       "word": "39428908",
       "sha256": "2f6add64039dc56c421bd0b155cf7573860190ede32d54fd8a7d7cc003fbe56e"
+    },
+    "70000105dc": {
+      "word": "f94156f8",
+      "sha256": "e700c7eb1b7dd9d60b742e5efe9f9b39333c7867a6f6d5bddd6ea406347ffeec"
+    },
+    "7000852d10": {
+      "word": "9400255c",
+      "sha256": "e1fcf71411423de1f20fb431bf19f15576accac1d5d8c790ef0b259a4e90e1bf"
+    },
+    "70008f0fd4": {
+      "word": "f94013e0",
+      "sha256": "08ce73cef814904053a2b8de69dbb1a4fb70a5290abcd69e2ba3d231d0a9a54b",
+      "before": "97ffd9c4"
+    },
+    "7001026834": {
+      "word": "17fffda4",
+      "sha256": "4ca5cd5029ccfb5fb86dab5014e7f6f1ec227101afc874228e8780d8f489526e"
+    },
+    "7001130090": {
+      "word": "b980e008",
+      "sha256": "d0bfe6716fd094a9f4fdddbaee4a6a94491c9bade746cfa824f958ea5135c280"
     }
   },
   "hooks_sha256": "a601f15cc119b174f9eba323d71c5c83e20a06b6130513fa0de965fdca39b606"

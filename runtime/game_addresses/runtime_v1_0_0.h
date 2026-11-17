@@ -96,3 +96,8 @@ GA_ADDR(RAY_RESULT_VT,                    0x7001c50d88)
 GA_ADDR(RAY_RESULT_HIT_VT,                0x7001c50da8)
 GA_ADDR(RAY_FILTER_VT,                    0x7001c50b98)
 GA_ADDR(RAY_HOOKSHOT_MASK,                0x810200d5)
+
+// Inside The Dream: the island's tree query whose boxes load the cells (runtime/hle/firstperson.c rt_far_query, its
+// caller), and the game's command-buffer memory callback, the dispatcher (runtime/nvn/cmdbuf.c no_handler)
+GA_ADDR(FP_FAR_ASKER,                     0x700085c51c)
+GA_ADDR(CMDBUF_OOM_DISPATCH,              0x700113e6c0)
